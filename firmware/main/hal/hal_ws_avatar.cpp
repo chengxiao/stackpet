@@ -12,10 +12,14 @@
 #include <web_socket.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
-#include <jpg/image_to_jpeg.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/event_groups.h>
+#include <freertos/task.h>
+#include <stackpet/camera/frame_grabber.h>
 #include <wifi_station.h>
 #include <ArduinoJson.hpp>
 #include <settings.h>
+#include <atomic>
 #include <mutex>
 #include <queue>
 #include <vector>
@@ -30,6 +34,17 @@ static std::string _tag = "WS-Avatar";
 
 static const std::string _setting_ns              = "stackchan";
 static const std::string _setting_device_name_key = "device_name";
+
+// Camera streaming to the app. The frames come from stackpet::FrameGrabber (capture + JPEG in its own task) and
+// are sent by a dedicated task, so neither capture nor network stalls the mooncake main loop any more.
+// The old implementation captured and encoded synchronously in the main loop every 350 ms (700 ms in video
+// mode) at JPEG quality 20.
+static constexpr uint8_t _stream_jpeg_quality      = 40;
+static constexpr uint8_t _stream_max_fps           = 12;
+static constexpr uint32_t _stream_interval_ms      = 1000 / 12;  // ~12 fps
+static constexpr uint32_t _video_mode_interval_ms  = 1000 / 8;   // ~8 fps, the device also decodes incoming video
+static constexpr uint32_t _sender_stop_timeout_ms  = 1500;
+static constexpr size_t _max_ws_payload            = 65535 - 5;  // WebSocket::Send limit minus our packet header
 
 class WebSocketAvatar {
 public:
@@ -95,52 +110,72 @@ public:
         });
     }
 
+    ~WebSocketAvatar()
+    {
+        // Blocks until the camera sender is really gone: it runs on this object, so returning earlier would be a
+        // use-after-free if it is still inside Send()
+        stop_streaming(portMAX_DELAY);
+    }
+
     void connect()
     {
         auto token = secret_logic::generate_auth_token();
 
-        // 销毁旧实例，确保状态复位
-        _websocket.reset();
+        // 销毁旧实例，确保状态复位. Only the pointer swaps happen under _send_mutex: the camera sender task never
+        // sees a half-built or destroyed connection, and it is not blocked during the slow Connect() below.
+        std::unique_ptr<WebSocket> old_websocket;
+        {
+            std::lock_guard<std::mutex> lock(_send_mutex);
+            old_websocket = std::move(_websocket);
+        }
+        old_websocket.reset();
 
         auto& board  = Board::GetInstance();
         auto network = board.GetNetwork();
 
         // 创建 WebSocket 实例
-        _websocket = network->CreateWebSocket(1);
+        auto websocket = network->CreateWebSocket(1);
 
-        if (!_websocket) {
+        if (!websocket) {
             ESP_LOGE(_tag.c_str(), "Failed to create websocket");
             return;
         }
+        WebSocket* ws = websocket.get();
 
         // 设置认证头
-        _websocket->SetHeader("Authorization", token.c_str());
+        ws->SetHeader("Authorization", token.c_str());
 
-        // 设置回调
-        _websocket->OnConnected([this]() {
+        // 设置回调. OnConnected() runs inside Connect(), before the new instance is published in _websocket,
+        // so it uses its own instance directly.
+        ws->OnConnected([this, ws]() {
             ESP_LOGI(_tag.c_str(), "Connected to server!");
             // GetHAL().onWsLog.emit(CommonLogLevel::Info, "Server connected");
             _last_heartbeat_time = GetHAL().millis();
-            _websocket->Send("{\"type\":\"hello\", \"msg\":\"Hello from StackChan!\"}");
+            ws->Send("{\"type\":\"hello\", \"msg\":\"Hello from StackChan!\"}");
         });
 
-        _websocket->OnDisconnected([this]() {
+        ws->OnDisconnected([this]() {
             ESP_LOGI(_tag.c_str(), "Disconnected!");
             // GetHAL().onWsLog.emit(CommonLogLevel::Error, "Server disconnected");
         });
 
-        _websocket->OnData([this](const char* data, size_t len, bool binary) {
+        ws->OnData([this](const char* data, size_t len, bool binary) {
             std::lock_guard<std::mutex> lock(_mutex);
             _msg_queue.push({binary, std::vector<uint8_t>(data, data + len)});
         });
 
         // ESP_LOGI(_tag.c_str(), "Connecting to %s...", _url.c_str());
         // GetHAL().onWsLog.emit(CommonLogLevel::Info, "Connecting to server...");
-        if (!_websocket->Connect(_url.c_str())) {
+        if (!ws->Connect(_url.c_str())) {
             ESP_LOGE(_tag.c_str(), "Failed to connect");
             GetHAL().onWsLog.emit(CommonLogLevel::Error, "Connect to server Failed");
         }
         _last_reconnect_attempt = GetHAL().millis();
+
+        {
+            std::lock_guard<std::mutex> lock(_send_mutex);
+            _websocket = std::move(websocket);
+        }
     }
 
     void update()
@@ -162,13 +197,6 @@ public:
                 GetHAL().onWsLog.emit(CommonLogLevel::Error, "Heartbeat Timeout");
                 _last_heartbeat_time = GetHAL().millis();
                 return;
-            }
-        }
-
-        if (_is_streaming) {
-            if (GetHAL().millis() - _last_capture_time >= (_is_video_mode ? 700 : 350)) {
-                captureAndSendFrame();
-                _last_capture_time = GetHAL().millis();
             }
         }
     }
@@ -194,7 +222,12 @@ public:
         if (msg.binary) {
             if (msg.data.size() < 1) return;
             DataType type = static_cast<DataType>(msg.data[0]);
-            ESP_LOGI(_tag.c_str(), "Received binary type: %d, len: %d", (int)type, (int)msg.data.size());
+            if (type == DataType::Jpeg || type == DataType::Opus) {
+                // Video / audio frames arrive many times per second
+                ESP_LOGD(_tag.c_str(), "Received binary type: %d, len: %d", (int)type, (int)msg.data.size());
+            } else {
+                ESP_LOGI(_tag.c_str(), "Received binary type: %d, len: %d", (int)type, (int)msg.data.size());
+            }
 
             switch (type) {
                 // Opus handled in OnData Fast Path
@@ -209,13 +242,17 @@ public:
                 case DataType::StartCameraStream: {
                     ESP_LOGI(_tag.c_str(), "Start Camera Stream");
                     setStreamingEnabled(true);
-                    _websocket->Send("camera stream started");
+                    if (_websocket) {
+                        _websocket->Send("camera stream started");
+                    }
                     break;
                 }
                 case DataType::StopCameraStream: {
                     ESP_LOGI(_tag.c_str(), "Stop Camera Stream");
                     setStreamingEnabled(false);
-                    _websocket->Send("camera stream stopped");
+                    if (_websocket) {
+                        _websocket->Send("camera stream stopped");
+                    }
                     break;
                 }
                 case DataType::ControlAvatar: {
@@ -317,7 +354,7 @@ public:
                 case DataType::Jpeg: {
                     // Protocol: [Type(1)] [Length(4)] [Payload]
                     if (msg.data.size() >= 5) {
-                        ESP_LOGI(_tag.c_str(), "Jpeg Frame Received, size: %d", (int)(msg.data.size() - 5));
+                        ESP_LOGD(_tag.c_str(), "Jpeg Frame Received, size: %d", (int)(msg.data.size() - 5));
 
                         static int64_t _time_count = 0;
                         static int64_t _interval   = 0;
@@ -333,7 +370,7 @@ public:
                                 // ESP_LOGI(_tag.c_str(), "Done");
 
                                 _interval = esp_timer_get_time() - _time_count;
-                                mclog::info("jpeg decode time: {} ms", _interval / 1000);
+                                mclog::debug("jpeg decode time: {} ms", _interval / 1000);
 
                                 GetHAL().onWsVideoFrame.emit(image);
                             } else {
@@ -375,63 +412,29 @@ public:
         return _websocket && _websocket->IsConnected();
     }
 
-    void captureAndSendFrame()
-    {
-        if (!isConnected()) {
-            return;
-        }
-
-        static int64_t _time_count = 0;
-        static int64_t _interval   = 0;
-
-        auto camera = hal_bridge::board_get_camera();
-        if (!camera) {
-            return;
-        }
-
-        _time_count = esp_timer_get_time();
-        if (camera->StreamCaptures()) {
-            _interval = esp_timer_get_time() - _time_count;
-            mclog::info("camera capture time: {} ms", _interval / 1000);
-
-            const uint8_t* frameData = camera->GetFrameData();
-            size_t frameSize         = camera->GetFrameSize();
-            int width                = camera->GetFrameWidth();
-            int height               = camera->GetFrameHeight();
-            int format               = camera->GetFrameFormat();
-
-            uint8_t* jpeg_data = nullptr;
-            size_t jpeg_len    = 0;
-
-            // 压缩为 JPEG
-            _time_count = esp_timer_get_time();
-            if (image_to_jpeg((uint8_t*)frameData, frameSize, width, height, (v4l2_pix_fmt_t)format, 20, &jpeg_data,
-                              &jpeg_len)) {
-                _interval = esp_timer_get_time() - _time_count;
-                // mclog::info("jpeg encode time: {} ms, size: {}", _interval / 1000, jpeg_len);
-                mclog::info("jpeg encode time: {} ms", _interval / 1000);
-
-                if (jpeg_data) {
-                    sendPacket(DataType::Jpeg, jpeg_data, jpeg_len);  // Type 2 for JPEG
-                    free(jpeg_data);
-                }
-            }
-        }
-    }
-
     void setStreamingEnabled(bool enabled)
     {
-        _is_streaming = enabled;
+        if (enabled == _is_streaming.load()) {
+            return;
+        }
+        if (enabled) {
+            start_streaming();
+        } else {
+            stop_streaming(pdMS_TO_TICKS(_sender_stop_timeout_ms));
+        }
     }
 
 private:
     std::unique_ptr<WebSocket> _websocket;
     std::string _url;
     uint32_t _last_reconnect_attempt = 0;
-    uint32_t _last_capture_time      = 0;
     uint32_t _last_heartbeat_time    = 0;
-    bool _is_streaming               = false;
-    bool _is_video_mode              = false;
+    std::atomic<bool> _is_streaming{false};
+    std::atomic<bool> _is_video_mode{false};
+    TaskHandle_t _sender_task   = nullptr;  // set while a sender task exists (joined via sender_events())
+    bool _grabber_started_by_us = false;
+    bool _jpeg_consumer_added   = false;
+    bool _wifi_performance      = false;
     std::mutex _mutex;
     std::queue<ReceivedMessage> _msg_queue;
 
@@ -476,6 +479,155 @@ private:
         _websocket->Send(packet.data(), packet.size(), true);
         // _interval = esp_timer_get_time() - _time_count;
         // mclog::info("send time: {} ms, size: {}", _interval / 1000, packet.size());
+    }
+
+    static constexpr EventBits_t _sender_exited_bit = BIT0;
+
+    // One event group for the whole process: there is a single WebSocketAvatar and it is never deleted while a
+    // sender could still signal it, so the group itself is never freed either.
+    static EventGroupHandle_t sender_events()
+    {
+        static EventGroupHandle_t events = xEventGroupCreate();
+        return events;
+    }
+
+    // Wait for the sender task to exit. Returns true when there is no sender (any more).
+    bool join_sender(TickType_t timeout)
+    {
+        if (_sender_task == nullptr) {
+            return true;
+        }
+        EventBits_t bits = xEventGroupWaitBits(sender_events(), _sender_exited_bit, pdTRUE, pdTRUE, timeout);
+        if ((bits & _sender_exited_bit) == 0) {
+            return false;
+        }
+        _sender_task = nullptr;
+        return true;
+    }
+
+    void start_streaming()
+    {
+        // Never two senders: a previous one must have exited first
+        if (!join_sender(pdMS_TO_TICKS(_sender_stop_timeout_ms))) {
+            ESP_LOGE(_tag.c_str(), "Previous camera sender still running, not starting a new one");
+            return;
+        }
+
+        auto& grabber = stackpet::FrameGrabber::instance();
+        if (!grabber.isRunning()) {
+            stackpet::GrabberConfig config;
+            config.jpegQuality     = _stream_jpeg_quality;
+            config.maxFps          = _stream_max_fps;
+            config.lumaWidth       = 0;  // streaming only, no vision
+            config.lumaHeight      = 0;
+            _grabber_started_by_us = grabber.start(config);
+            if (!_grabber_started_by_us) {
+                ESP_LOGE(_tag.c_str(), "Camera unavailable, cannot stream");
+                return;
+            }
+        }
+        if (!_jpeg_consumer_added) {
+            grabber.addJpegConsumer();
+            _jpeg_consumer_added = true;
+        }
+
+        _is_streaming = true;
+        xEventGroupClearBits(sender_events(), _sender_exited_bit);
+        if (xTaskCreate(&WebSocketAvatar::sender_task_entry, "ws_cam_sender", 4096, this, 4, &_sender_task) != pdPASS) {
+            ESP_LOGE(_tag.c_str(), "Failed to create camera sender task");
+            _sender_task  = nullptr;
+            _is_streaming = false;
+            release_camera();
+            return;
+        }
+
+        // Modem sleep delays TCP ACKs by a DTIM period and throttles the upload
+        WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::PERFORMANCE);
+        _wifi_performance = true;
+    }
+
+    void stop_streaming(TickType_t joinTimeout)
+    {
+        _is_streaming = false;
+        // The sender wakes up at least every 300 ms (waitJpeg timeout) or after its current Send()
+        if (!join_sender(joinTimeout)) {
+            ESP_LOGE(_tag.c_str(), "Camera sender task did not stop in time");
+        }
+        release_camera();
+        if (_wifi_performance) {
+            WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::BALANCED);
+            _wifi_performance = false;
+        }
+    }
+
+    void release_camera()
+    {
+        if (_jpeg_consumer_added) {
+            stackpet::FrameGrabber::instance().removeJpegConsumer();
+            _jpeg_consumer_added = false;
+        }
+        if (_grabber_started_by_us) {
+            stackpet::FrameGrabber::instance().stop();
+            _grabber_started_by_us = false;
+        }
+    }
+
+    static void sender_task_entry(void* param)
+    {
+        static_cast<WebSocketAvatar*>(param)->sender_loop();
+        // Last action: after this bit is set the owner may be destroyed, so `param` must not be touched again
+        xEventGroupSetBits(sender_events(), _sender_exited_bit);
+        vTaskDelete(nullptr);
+    }
+
+    // All locals live here, so they are destroyed before the task deletes itself
+    void sender_loop()
+    {
+        auto& grabber          = stackpet::FrameGrabber::instance();
+        uint32_t seq           = 0;
+        uint32_t last_send_ms  = 0;
+        uint32_t window_frames = 0;
+        uint32_t window_start  = GetHAL().millis();
+
+        while (_is_streaming.load()) {
+            stackpet::JpegFrame frame;
+            if (!grabber.waitJpeg(seq, frame, 300)) {
+                // waitJpeg() already waited the full timeout, even with a stopped grabber; never spin anyway
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            seq = frame.seq;
+
+            // Pace the upload; after waiting, take whatever frame is newest by then
+            uint32_t interval = _is_video_mode.load() ? _video_mode_interval_ms : _stream_interval_ms;
+            uint32_t elapsed  = GetHAL().millis() - last_send_ms;
+            if (elapsed < interval) {
+                vTaskDelay(pdMS_TO_TICKS(interval - elapsed));
+                stackpet::JpegFrame newer;
+                if (grabber.waitJpeg(seq, newer, 0)) {
+                    frame = std::move(newer);
+                    seq   = frame.seq;
+                }
+            }
+            if (!_is_streaming.load()) {
+                break;
+            }
+            if (frame.data->size() > _max_ws_payload) {
+                ESP_LOGW(_tag.c_str(), "JPEG frame too large for one websocket frame: %d", (int)frame.data->size());
+                continue;
+            }
+
+            sendPacket(DataType::Jpeg, frame.data->data(), frame.data->size());
+            last_send_ms = GetHAL().millis();
+
+            window_frames++;
+            if (last_send_ms - window_start >= 10000) {
+                mclog::tagInfo(_tag, "camera stream: {:.1f} fps, {} bytes/frame",
+                               window_frames * 1000.0f / (last_send_ms - window_start), frame.data->size());
+                window_frames = 0;
+                window_start  = last_send_ms;
+            }
+        }
     }
 };
 

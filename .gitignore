@@ -1,2 +1,6 @@
 .DS_Store
 .idea/
+# StackPet: per-track / test build directories
+firmware/build_*/
+firmware/tools/__pycache__/
+firmware/tools/face_preview/preview/

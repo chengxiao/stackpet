@@ -1,5 +1,39 @@
 ## IDF Component Manager Manifest File
 dependencies:
+  # StackPet RADAR: face detection (ESP-DL MSR+MNP). esp-dl is pinned to 3.3.0, the newest release compatible
+  # with this project: esp-sr pins esp-dsp 1.7.0 (esp-dl >= 3.3.1 needs 1.8.0) and xiaozhi pins esp_new_jpeg ^0.6.1
+  # (esp-dl >= 3.3.3 needs ^1).
+  espressif/human_face_detect: ==0.5.0
+  espressif/esp-dl: ==3.3.0
+  # StackPet: adding esp-dl made the component manager re-solve the whole tree and bump these (none of the new
+  # versions is needed by esp-dl). Pinned back to what the AI agent mode (wake word, audio codec, camera) was
+  # validated with on 2026-10-11: unpin only together with a full xiaozhi regression run. `require: no`: version pins
+  # only, main does not use them itself.
+  espressif/dl_fft:
+    version: ==0.3.1
+    require: no
+    rules:
+    - if: target in [esp32s3]
+  espressif/esp_sccb_intf:
+    version: ==0.0.8
+    require: no
+    rules:
+    - if: target in [esp32s3]
+  espressif/i2c_bus:
+    version: ==1.5.1
+    require: no
+    rules:
+    - if: target in [esp32s3]
+  78/uart-uhci:
+    version: ==0.2.1
+    require: no
+    rules:
+    - if: target in [esp32s3]
+  espressif/iot_usbh_cdc:
+    version: ==3.0.0
+    require: no
+    rules:
+    - if: target in [esp32s3]
   waveshare/esp_lcd_sh8601: 1.0.2
   espressif/esp_lcd_co5300: ^2.0.3
   espressif/esp_lcd_ili9341: ==1.2.0
@@ -30,7 +64,8 @@ dependencies:
     - if: target not in [esp32]
   78/xiaozhi-fonts: ~1.6.0
   espressif/led_strip: ~3.0.2
-  espressif/esp_codec_dev: ~1.5.4
+  # StackPet: pinned (was ~1.5.4), see the note on the pinned dependencies near the top
+  espressif/esp_codec_dev: ==1.5.4
   espressif/esp-sr: ~2.3.0
   espressif/button: ~4.1.5
   espressif/knob: ^1.0.0

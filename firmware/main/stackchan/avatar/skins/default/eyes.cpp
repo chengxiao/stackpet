@@ -118,6 +118,15 @@ void DefaultEyes::setEmotion(const Emotion& emotion)
         case Emotion::Sleepy:
             apply_style(35, -50);
             break;
+        // StackPet emotions: the official skin has no dedicated shapes, use the closest existing one
+        case Emotion::Laughing:
+        case Emotion::Shy:
+        case Emotion::Love:
+            apply_style(72, 1550);
+            break;
+        case Emotion::Surprised:
+            apply_style(100, 0);
+            break;
         default:
             break;
     }

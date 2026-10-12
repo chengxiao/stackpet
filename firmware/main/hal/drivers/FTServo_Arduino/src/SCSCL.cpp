@@ -214,13 +214,20 @@ int SCSCL::SwitchMode(int ID, u8 mode)
 	const u8 servo_id = static_cast<u8>(ID);
 
 	if(mode == 1){
-		min_angle[servo_id] = readWord(servo_id, SCSCL_MIN_ANGLE_LIMIT_L);
-		max_angle[servo_id] = readWord(servo_id, SCSCL_MAX_ANGLE_LIMIT_L);
-		if(min_angle[servo_id] == -1 || max_angle[servo_id] == -1){
+		const int min_limit = readWord(servo_id, SCSCL_MIN_ANGLE_LIMIT_L);
+		const int max_limit = readWord(servo_id, SCSCL_MAX_ANGLE_LIMIT_L);
+		if(min_limit == -1 || max_limit == -1){
 			return -3;
 		}
-
-		angle_limit_cached[servo_id] = true;
+		// 0 / 0 is wheel mode already (an earlier switch went through, its answer got lost): keep the cached limits,
+		// restoring 0 / 0 would leave the servo in wheel mode
+		if(min_limit < max_limit){
+			min_angle[servo_id] = min_limit;
+			max_angle[servo_id] = max_limit;
+			angle_limit_cached[servo_id] = true;
+		}else if(!angle_limit_cached[servo_id]){
+			return -7;
+		}
 		return PWMMode(servo_id);
 	}
 
@@ -235,6 +242,16 @@ int SCSCL::SwitchMode(int ID, u8 mode)
 	}
 
 	return 0;
+}
+
+void SCSCL::CacheAngleLimit(int ID, int minLimit, int maxLimit)
+{
+	if(ID < 0 || ID > 0xff || minLimit < 0 || maxLimit <= minLimit){
+		return;
+	}
+	min_angle[ID] = minLimit;
+	max_angle[ID] = maxLimit;
+	angle_limit_cached[ID] = true;
 }
 
 int SCSCL::ReadToqueEnable(int ID)

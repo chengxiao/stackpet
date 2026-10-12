@@ -12,3 +12,8 @@
 #include "app_app_center/app_app_center.h"
 #include "app_ezdata/app_ezdata.h"
 #include "app_dance/app_dance.h"
+#include "app_remote/app_remote.h"
+#include "app_freeze/app_freeze.h"
+#include "app_spin/app_spin.h"
+#include "app_face/app_face.h"
+#include "app_radar/app_radar.h"

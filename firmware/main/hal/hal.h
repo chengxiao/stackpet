@@ -309,6 +309,7 @@ private:
     void xiaozhi_mcp_init();
     void ble_init(bool useAltUuid);
     void servo_init();
+    void servo_early_stop();
     void head_touch_init();
     void io_expander_init();
     void imu_init();

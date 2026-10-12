@@ -3,7 +3,9 @@
 nvs,      data, nvs,     0x9000,    0x4000,
 otadata,  data, ota,     0xd000,    0x2000,
 phy_init, data, phy,     0xf000,    0x1000,
-ota_0,    app,  ota_0,   0x20000,   0x4f0000,
-ota_1,    app,  ota_1,   ,          0x4f0000,
-assets,   data, spiffs,  0xA00000,  4M,
+# StackPet: single app slot. ESP-DL face detection (RADAR) makes the app ~6MB, which no longer fits two 0x4f0000 OTA
+# slots next to the 0x580000 assets partition. nvs / assets keep their offsets (Wi-Fi config and assets survive).
+# OTA upgrades now fail safely in esp_ota_begin (ESP_ERR_OTA_PARTITION_CONFLICT); flash over USB instead.
+ota_0,    app,  ota_0,   0x20000,   0x9e0000,
+assets,   data, spiffs,  0xA00000,  0x580000,
 coredump, data, coredump,,          0x10000,

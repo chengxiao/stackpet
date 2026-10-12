@@ -14,6 +14,9 @@ file(GLOB_RECURSE STACK_CHAN_SOURCES
     "stackchan/*.c"
     "stackchan/*.cc"
     "stackchan/*.cpp"
+    "stackpet/*.c"
+    "stackpet/*.cc"
+    "stackpet/*.cpp"
 )
 set(STACK_CHAN_INCLUDE_DIRS 
     "."
@@ -289,8 +292,16 @@ if(CONFIG_IDF_TARGET_ESP32S3)
     list(APPEND SOURCES "${XIAOZHI_MAIN_DIR}/boards/common/esp32_camera.cc")
 endif()
 
+# StackPet face detector bench (test builds only, see below): a face photo as the positive probe
+set(STACKPET_BENCH_EMBED "")
+if(STACKPET_FD_BENCH)
+    set(STACKPET_BENCH_EMBED "stackpet/vision/testdata/face_probe.jpg")
+endif()
+
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${STACKPET_BENCH_EMBED}
+                    EMBED_TXTFILES "stackpet/web/index.html"
+                    LDFRAGMENTS "stackpet/stackpet.lf"
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
@@ -304,6 +315,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_driver_i2s
                         esp_driver_jpeg
                         esp_driver_ppa
+                        esp_http_server
                         esp_app_format
                         app_update
                         spi_flash
@@ -327,6 +339,21 @@ target_compile_definitions(${COMPONENT_LIB}
                     PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
                     PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                     )
+
+# StackPet test hook: `idf.py -DSTACKPET_AUTOOPEN=<launcher index> build` makes the launcher open that app after boot
+if(DEFINED STACKPET_AUTOOPEN)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE STACKPET_AUTOOPEN=${STACKPET_AUTOOPEN})
+endif()
+# StackPet test hook: `-DSTACKPET_FD_BENCH=1` (with STACKPET_AUTOOPEN=11) makes the RADAR app benchmark the face
+# detector instead of running, see stackpet/vision/face_bench.h. `-DSTACKPET_FD_BENCH=0` turns it off again.
+if(STACKPET_FD_BENCH)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE STACKPET_FD_BENCH=1)
+endif()
+# StackPet test hook: `-DSTACKPET_CAL=1` (with STACKPET_AUTOOPEN=7) adds the aim / rotation calibration endpoints to
+# the REMOTE app (/debug/faces with the face detector running, /debug/spin), driven by the host tool aim_cal.py
+if(STACKPET_CAL)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE STACKPET_CAL=1)
+endif()
 
 # Add generation rules
 add_custom_command(
@@ -425,6 +452,11 @@ function(build_default_assets_bin)
     list(APPEND BUILD_ARGS "--esp_sr_model_path" "${ESP_SR_MODEL_PATH}")
     list(APPEND BUILD_ARGS "--xiaozhi_fonts_path" "${XIAOZHI_FONTS_PATH}")
     
+    # StackPet: also rebuild when an extra asset (icons, images) changes, not only when sdkconfig changes
+    if(DEFAULT_ASSETS_EXTRA_FILES)
+        file(GLOB DEFAULT_ASSETS_EXTRA_DEPENDS CONFIGURE_DEPENDS "${DEFAULT_ASSETS_EXTRA_FILES}/*")
+    endif()
+
     # Create custom command to build assets
     add_custom_command(
         OUTPUT ${GENERATED_ASSETS_BIN}
@@ -432,6 +464,7 @@ function(build_default_assets_bin)
         DEPENDS
             ${SDKCONFIG}
             ${XIAOZHI_MAIN_DIR}/../scripts/build_default_assets.py
+            ${DEFAULT_ASSETS_EXTRA_DEPENDS}
         COMMENT "Building default assets.bin based on configuration"
         VERBATIM
     )
@@ -511,6 +544,11 @@ if ("${size}" AND "${offset}")
     if(CONFIG_FLASH_DEFAULT_ASSETS)
         # Build default assets based on configuration
         build_default_assets_bin()
+        # StackPet: fail the build instead of silently overflowing into the next partition when flashing
+        add_custom_command(TARGET generated_default_assets POST_BUILD
+            COMMAND python -c "import os, sys; used = os.path.getsize(sys.argv[1]); cap = int(sys.argv[2], 0); print(f'assets.bin: {used} / {cap} bytes ({used * 100 // cap}%)'); sys.exit(f'assets.bin is {used - cap} bytes larger than the assets partition' if used > cap else 0)" "${GENERATED_ASSETS_LOCAL_FILE}" "${size}"
+            VERBATIM
+        )
         esptool_py_flash_to_partition(flash "assets" "${GENERATED_ASSETS_LOCAL_FILE}")
         message(STATUS "Generated default assets flash configured: ${GENERATED_ASSETS_LOCAL_FILE} -> assets partition")
     elseif(CONFIG_FLASH_CUSTOM_ASSETS)

@@ -60,6 +60,7 @@ public:
 	int PWMMode(u8 ID);//PWM模式
 	int WritePWM(u8 ID, s16 pwmOut);//PWM输出模式指令
 	int SwitchMode(int ID, u8 mode);//切换位置模式和PWM模式
+	void CacheAngleLimit(int ID, int minLimit, int maxLimit);//位置模式的限位(恢复用), SwitchMode(1)读到 0/0 时沿用
 	int EnableTorque(u8 ID, u8 Enable);//扭矩控制指令
 	int unLockEprom(u8 ID);//eprom解锁
 	int LockEprom(u8 ID);//eprom加锁

@@ -16,6 +16,10 @@ namespace stackchan::avatar {
  */
 class Avatar {
 public:
+    // StackPet: avatars are owned through std::unique_ptr<Avatar> (StackChan::attachAvatar / resetAvatar), so the
+    // destructor must be virtual, otherwise a skin's own members (e.g. DefaultAvatar's panel) are never destroyed
+    virtual ~Avatar() = default;
+
     /**
      * @brief Update avatar, trigger all elements, decorators and modifiers to update
      *

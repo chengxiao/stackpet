@@ -11,6 +11,7 @@
 #include <mooncake_log.h>
 #include <hal/hal.h>
 #include <memory>
+#include <stackpet/face/face.h>
 
 using namespace smooth_ui_toolkit::lvgl_cpp;
 using namespace setup_workers;
@@ -25,8 +26,7 @@ WifiSetupWorker::WifiSetupWorker()
     _is_first_in = true;
 
     // Create default avatar
-    auto avatar = std::make_unique<avatar::DefaultAvatar>();
-    avatar->init(lv_screen_active(), &lv_font_montserrat_24);
+    auto avatar = stackpet::face::create(lv_screen_active(), &lv_font_montserrat_24);
     avatar->leftEye().setVisible(false);
     avatar->rightEye().setVisible(false);
     avatar->mouth().setVisible(false);

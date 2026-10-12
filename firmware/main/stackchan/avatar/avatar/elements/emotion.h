@@ -14,6 +14,13 @@ enum class Emotion {
     Sad,
     Doubt,
     Sleepy,
+    // StackPet: appended so the values above keep their numbers (they travel over BLE / websocket JSON)
+    Laughing,
+    Surprised,
+    Shy,
+    Love,
 };
+
+constexpr int kEmotionCount = static_cast<int>(Emotion::Love) + 1;
 
 }  // namespace stackchan::avatar

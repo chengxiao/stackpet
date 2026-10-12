@@ -23,6 +23,7 @@ using namespace stackchan;
 #include <string>
 #include <sstream>
 #include <unordered_set>
+#include <stackpet/face/face.h>
 
 static bool contains_word(const std::string& text, const std::unordered_set<std::string>& words)
 {
@@ -84,9 +85,9 @@ void AppAvatar::onOpen()
     loading_page.reset();
 
     // Create default avatar
-    auto avatar = std::make_unique<avatar::DefaultAvatar>();
-    avatar->init(lv_screen_active());
-    avatar->getPanel()->onClick().connect([&]() { _screen_clicked_flag = true; });
+    uitk::lvgl_cpp::Container* avatar_panel = nullptr;
+    auto avatar = stackpet::face::create(lv_screen_active(), &lv_font_montserrat_16, &avatar_panel);
+    avatar_panel->onClick().connect([&]() { _screen_clicked_flag = true; });
     GetStackChan().attachAvatar(std::move(avatar));
 
     /* ------------------------------- BLE events ------------------------------- */

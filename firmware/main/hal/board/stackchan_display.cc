@@ -17,6 +17,7 @@
 #include <stackchan/stackchan.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
+#include <stackpet/face/face.h>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
@@ -251,9 +252,9 @@ void StackChanAvatarDisplay::SetupUI()
 
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
 
-    auto avatar = std::make_unique<DefaultAvatar>();
-    avatar->init(lv_screen_active());
-    avatar->getPanel()->onClick().connect([]() {
+    uitk::lvgl_cpp::Container* avatar_panel = nullptr;
+    auto avatar = stackpet::face::create(lv_screen_active(), &lv_font_montserrat_16, &avatar_panel);
+    avatar_panel->onClick().connect([]() {
         static uint32_t last_toggle_tick = 0;
         const uint32_t now               = GetHAL().millis();
         if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
@@ -332,19 +333,31 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     auto& avatar = stackchan.avatar();
 
-    // Map emotion string to stackchan::Emotion
-    if (strcmp(emotion, "neutral") == 0) {
-        avatar.setEmotion(Emotion::Neutral);
-    } else if (strcmp(emotion, "happy") == 0) {
-        avatar.setEmotion(Emotion::Happy);
-    } else if (strcmp(emotion, "laughing") == 0) {
-        avatar.setEmotion(Emotion::Happy);
-    } else if (strcmp(emotion, "angry") == 0) {
-        avatar.setEmotion(Emotion::Angry);
-    } else if (strcmp(emotion, "sad") == 0) {
-        avatar.setEmotion(Emotion::Sad);
-    } else if (strcmp(emotion, "crying") == 0) {
-        avatar.setEmotion(Emotion::Sad);
+    // Map the xiaozhi emotion (the LLM's emoji set) to stackchan::Emotion. StackPet: the original mapping only knew
+    // 6 names and showed every other emotion (surprised, loving, embarrassed, thinking, ...) as neutral.
+    struct EmotionName {
+        const char* name;
+        Emotion emotion;
+    };
+    static constexpr EmotionName kEmotionNames[] = {
+        {"neutral", Emotion::Neutral},     {"relaxed", Emotion::Neutral},     {"confident", Emotion::Neutral},
+        {"cool", Emotion::Neutral},        {"happy", Emotion::Happy},         {"winking", Emotion::Happy},
+        {"delicious", Emotion::Happy},     {"laughing", Emotion::Laughing},   {"funny", Emotion::Laughing},
+        {"silly", Emotion::Laughing},      {"angry", Emotion::Angry},         {"sad", Emotion::Sad},
+        {"crying", Emotion::Sad},          {"surprised", Emotion::Surprised}, {"shocked", Emotion::Surprised},
+        {"thinking", Emotion::Doubt},      {"confused", Emotion::Doubt},      {"doubtful", Emotion::Doubt},
+        {"embarrassed", Emotion::Shy},     {"loving", Emotion::Love},         {"kissy", Emotion::Love},
+    };
+    const EmotionName* mapped = nullptr;
+    for (const auto& entry : kEmotionNames) {
+        if (strcmp(emotion, entry.name) == 0) {
+            mapped = &entry;
+            break;
+        }
+    }
+
+    if (mapped != nullptr) {
+        avatar.setEmotion(mapped->emotion);
     } else if (strcmp(emotion, "sleepy") == 0) {
         avatar.setEmotion(Emotion::Sleepy);
         avatar.setSpeech("Zzz…");
@@ -364,8 +377,6 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         auto& motion = GetStackChan().motion();
         motion.pitchServo().moveWithSpeed(0, 80);
 
-    } else if (strcmp(emotion, "doubtful") == 0) {
-        avatar.setEmotion(Emotion::Doubt);
     } else {
         ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
         avatar.setEmotion(Emotion::Neutral);

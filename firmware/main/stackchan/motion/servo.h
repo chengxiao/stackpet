@@ -64,6 +64,43 @@ public:
     }
 
     /**
+     * @brief Leave continuous rotation synchronously: stop the motor and switch back to position mode, holding
+     * the current angle. Must be called before anything that can restart the chip (warm reboot): the servo keeps
+     * its wheel mode while the ESP32 restarts, and a fresh boot cannot restore the cached angle limits.
+     */
+    virtual void stopRotation()
+    {
+    }
+
+    /**
+     * @brief The position sensor reading as is (StackPet: continuous rotation feedback and test benches), -1 when
+     * the servo did not answer. Unlike getCurrentAngle() it is not clamped and has no fallback: readings in the
+     * sensor's dead band are returned as they come.
+     */
+    virtual int readRawPosition()
+    {
+        return -1;
+    }
+
+    /**
+     * @brief Internal temperature in degree Celsius (StackPet: the RADAR slows its spin down when it runs hot), -1
+     * when unknown.
+     */
+    virtual int readTemperature()
+    {
+        return -1;
+    }
+
+    /**
+     * @brief The position sensor reading at angle 0, the calibrated zero (StackPet: the RADAR's spin tracker), -1
+     * when the servo has none.
+     */
+    virtual int getZeroRawPosition()
+    {
+        return -1;
+    }
+
+    /**
      * @brief Get servo current angle
      *
      * @return int
@@ -178,6 +215,8 @@ protected:
     void apply_default_spring_options();
     void update_angle_anim_target(int angle);
     void stop_motion_at_angle(int angle);
+    // Before switching to wheel mode (StackPet): no more position writes from the animation once it is at rest
+    void begin_rotation();
     uitk::SpringOptions_t map_speed_to_spring_options(int speed);
 };
 

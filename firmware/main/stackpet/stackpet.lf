@@ -1,0 +1,16 @@
+# StackPet linker fragment.
+#
+# esp-dl's hand-written TIE728 kernels (and two helpers in dl_tool.cpp) put themselves in IRAM (.section .iram1),
+# about 5KB. They only run in the RADAR face detector task, never from an ISR or with the flash cache disabled, so
+# they can execute from flash; that leaves the internal RAM to the rest of the firmware (the AI agent mode only has
+# ~40KB of internal RAM to spare).
+[scheme:stackpet_iram_to_flash]
+entries:
+    text -> flash_text
+    rodata -> flash_rodata
+    iram -> flash_text
+
+[mapping:stackpet_esp_dl]
+archive: libespressif__esp-dl.a
+entries:
+    * (stackpet_iram_to_flash)

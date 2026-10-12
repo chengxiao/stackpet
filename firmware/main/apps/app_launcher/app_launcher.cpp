@@ -48,6 +48,19 @@ void AppLauncher::onLauncherRunning()
     } else {
         _view->update();
         screensaver_update();
+
+#ifdef STACKPET_AUTOOPEN
+        // StackPet test hook (idf.py -DSTACKPET_AUTOOPEN=<launcher index> build): open that app once after boot
+        static bool autoopen_done = false;
+        if (!autoopen_done) {
+            autoopen_done = true;
+            auto props    = getAppProps();
+            if (STACKPET_AUTOOPEN >= 0 && STACKPET_AUTOOPEN < static_cast<int>(props.size())) {
+                mclog::tagInfo(getAppInfo().name, "autoopen app index: {}", STACKPET_AUTOOPEN);
+                openApp(props[STACKPET_AUTOOPEN].appID);
+            }
+        }
+#endif
     }
 
     GetStackChan().update();

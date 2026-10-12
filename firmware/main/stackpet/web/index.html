@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f1720">
+<meta name="referrer" content="no-referrer">
+<title>StackChan 遥控台</title>
+<style>
+:root{--bg:#0f1720;--card:#17212c;--card2:#1e2a37;--line:#2a3846;--text:#e8eef4;--muted:#8fa1b3;--accent:#3fa9f5;--ok:#3ddc97;--warn:#ffb648;--bad:#ff5a5f;--r:16px}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+body{padding:max(12px,env(safe-area-inset-top)) 12px max(20px,env(safe-area-inset-bottom))}
+main{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+h1{font-size:19px;margin:0;font-weight:700;letter-spacing:.5px}
+h1 b{color:var(--accent)}
+.pills{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.pill{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:3px 9px;font-size:12px;color:var(--muted);white-space:nowrap}
+.pill .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--muted);margin-right:5px;vertical-align:1px}
+.pill.on .dot{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.pill.off .dot{background:var(--bad)}
+.pill.low{color:#fff;background:var(--bad);border-color:var(--bad)}
+.banner{border-radius:12px;padding:10px 12px;font-size:14px;line-height:1.5;display:none}
+.banner.show{display:block}
+.banner.warn{background:rgba(255,182,72,.12);border:1px solid rgba(255,182,72,.45);color:#ffd79a}
+.banner.bad{background:rgba(255,90,95,.12);border:1px solid rgba(255,90,95,.45);color:#ffb3b5}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:12px}
+.card h2{font-size:14px;margin:0 0 10px;color:var(--muted);font-weight:600;display:flex;justify-content:space-between;align-items:center}
+.card h2 small{font-weight:400;font-size:12px}
+.video{position:relative;padding:0;overflow:hidden;background:#000;aspect-ratio:4/3}
+.video img{width:100%;height:100%;object-fit:contain;display:block;background:#000}
+.video .badge{position:absolute;top:10px;left:10px;background:rgba(0,0,0,.55);border-radius:8px;padding:2px 8px;font-size:12px;display:flex;gap:6px;align-items:center}
+.video .badge i{width:8px;height:8px;border-radius:50%;background:var(--bad)}
+.video.live .badge i{background:var(--ok);animation:blink 1.6s infinite}
+@keyframes blink{50%{opacity:.35}}
+.video .msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;text-align:center;padding:20px;background:rgba(0,0,0,.35)}
+.video.live .msg{display:none}
+.video .count{position:absolute;inset:0;display:none;align-items:center;justify-content:center;font-size:96px;font-weight:800;color:#fff;text-shadow:0 4px 24px rgba(0,0,0,.6);background:rgba(0,0,0,.25)}
+.video .count.show{display:flex}
+.video .flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .45s}
+.video .flash.on{opacity:.9;transition:none}
+.video:fullscreen{aspect-ratio:auto;border-radius:0;border:0}
+.row{display:flex;gap:8px}
+.row>*{flex:1}
+button,.chip{appearance:none;border:1px solid var(--line);background:var(--card2);color:var(--text);border-radius:12px;padding:10px 6px;font:inherit;font-size:14px;cursor:pointer;transition:transform .08s,background .15s,border-color .15s;user-select:none;-webkit-user-select:none;min-height:44px}
+button:active,.chip:active{transform:scale(.95);background:#253444}
+button:disabled{opacity:.5}
+button.primary{background:var(--accent);border-color:var(--accent);color:#04121f;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px}
+.chip{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:9px 4px}
+.chip span{font-size:22px;line-height:1.1}
+.chip em{font-style:normal;font-size:12px;color:var(--muted)}
+.chip.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.grid.emo{grid-template-columns:repeat(auto-fill,minmax(70px,1fr))}
+.card h2.sub{margin-top:14px}
+.seg{display:flex;gap:0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card2)}
+.seg button{flex:1;min-width:0;border:0;border-radius:0;background:transparent;padding:10px 2px;font-size:14px;white-space:nowrap}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.sel{background:var(--accent);color:#04121f;font-weight:600}
+.seg button:active{transform:none}
+.pad-wrap{display:flex;gap:12px;align-items:stretch}
+.pad{position:relative;flex:1;aspect-ratio:4/3;max-height:260px;border-radius:14px;background:
+radial-gradient(circle at 50% 100%,rgba(63,169,245,.16),transparent 70%),
+linear-gradient(var(--line) 1px,transparent 1px) 0 0/25% 33.33%,
+linear-gradient(90deg,var(--line) 1px,transparent 1px) 0 0/25% 33.33%,var(--card2);border:1px solid var(--line);touch-action:none;overflow:hidden}
+.pad .knob{position:absolute;width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#fff,var(--accent) 60%);box-shadow:0 0 0 6px rgba(63,169,245,.18),0 4px 14px rgba(0,0,0,.5);left:50%;top:100%;transition:left .25s,top .25s;pointer-events:none}
+.pad.drag .knob{transition:none}
+.pad .lab{position:absolute;font-size:11px;color:var(--muted);pointer-events:none}
+.side{display:flex;flex-direction:column;gap:8px;width:96px}
+.side button{flex:1;padding:6px 4px}
+.swatches{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.sw{aspect-ratio:1;border-radius:50%;border:2px solid var(--line);cursor:pointer;position:relative;min-height:36px}
+.sw:active{transform:scale(.92)}
+.sw.offc{background:repeating-linear-gradient(45deg,#333 0 4px,#222 4px 8px)}
+.sw input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.sw.pick{background:conic-gradient(red,yellow,lime,cyan,blue,magenta,red)}
+.speak{display:flex;gap:8px}
+.speak input{flex:1;min-width:0;background:var(--card2);border:1px solid var(--line);border-radius:12px;color:var(--text);padding:10px 12px;font:inherit;min-height:44px}
+.speak input:focus{outline:none;border-color:var(--accent)}
+.speak button{flex:none;padding:0 18px}
+.phrases{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.phrases button{flex:none;padding:5px 12px;font-size:13px;border-radius:999px}
+.vol{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.vol input{flex:1;accent-color:var(--accent);height:32px}
+.vol span{width:40px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+footer{color:var(--muted);font-size:12px;text-align:center;padding:6px 0 0;line-height:1.7}
+#toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(20px);background:rgba(20,30,40,.95);border:1px solid var(--line);border-radius:12px;padding:9px 16px;font-size:14px;opacity:0;transition:.2s;pointer-events:none;z-index:9;max-width:90%;text-align:center}
+#toast.show{opacity:1;transform:translateX(-50%)}
+#gate{display:none;position:fixed;inset:0;z-index:20;background:var(--bg);align-items:center;justify-content:center;flex-direction:column;gap:14px;padding:32px;text-align:center}
+#gate.show{display:flex}
+#gate .big{font-size:56px}
+#gate p{margin:0;font-size:17px;line-height:1.6}
+#gate small{color:var(--muted)}
+#gateForm{width:100%;max-width:360px;display:flex;flex-direction:column;gap:8px;margin-top:10px}
+#gateForm b{color:var(--text)}
+</style>
+</head>
+<body>
+<div id="gate"><div class="big">📱</div><p id="gateText">请扫描机器人屏幕上的二维码打开</p><small>在 StackChan 上打开 WEB.REMOTE，用手机相机或浏览器扫屏幕上的二维码</small>
+  <form id="gateForm"><small>扫不了码？输入屏幕最下面网址里 <b>?k=</b> 后面的 8 个字符：</small>
+    <div class="speak"><input id="gateKey" maxlength="64" placeholder="例如 abcd2345" autocomplete="off" autocapitalize="none" spellcheck="false" enterkeyhint="go"><button class="primary" type="submit">进入</button></div>
+  </form>
+</div>
+<main>
+  <header>
+    <h1>Stack<b>Chan</b> 遥控台</h1>
+    <div class="pills">
+      <span class="pill" id="pConn"><span class="dot"></span>连接中</span>
+      <span class="pill" id="pBat">🔋 --</span>
+      <span class="pill" id="pFps">🎞 -- fps</span>
+    </div>
+  </header>
+
+  <div class="banner warn" id="wechat">在微信里打开的话画面可能出不来：点右上角 ··· 选择「在浏览器打开」</div>
+  <div class="banner bad" id="lost">连不上 StackChan：确认它还停在遥控界面，手机连的是同一个 Wi-Fi</div>
+
+  <section class="card video" id="video">
+    <img id="cam" alt="">
+    <div class="badge"><i></i><span id="vInfo">实时画面</span></div>
+    <div class="msg" id="vMsg">画面连接中…</div>
+    <div class="count" id="count"></div>
+    <div class="flash" id="flash"></div>
+  </section>
+  <div class="row">
+    <button id="bShot">📸 拍照</button>
+    <button id="bFull">⛶ 全屏</button>
+    <button id="bRetry">↻ 重连画面</button>
+  </div>
+
+  <section class="card">
+    <h2>看哪里 <small>拖动小球转头，松手停在原处</small></h2>
+    <div class="pad-wrap">
+      <div class="pad" id="pad">
+        <span class="lab" style="top:6px;left:50%;transform:translateX(-50%)">↑ 抬头</span>
+        <span class="lab" style="left:8px;top:50%;transform:translateY(-50%)">← 左</span>
+        <span class="lab" style="right:8px;top:50%;transform:translateY(-50%)">右 →</span>
+        <div class="knob" id="knob"></div>
+      </div>
+      <div class="side">
+        <button data-home>🏠 回正</button>
+        <button data-act="nod">🙆 点头</button>
+        <button data-act="shake">🙅 摇头</button>
+        <button data-act="spin">🌀 转一圈</button>
+        <button data-act="dance">💃 跳舞</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>表情</h2>
+    <div class="grid emo">
+      <button class="chip" data-e="neutral"><span>😐</span><em>平静</em></button>
+      <button class="chip" data-e="happy"><span>😄</span><em>开心</em></button>
+      <button class="chip" data-e="laughing"><span>🤣</span><em>大笑</em></button>
+      <button class="chip" data-e="love"><span>😍</span><em>喜欢</em></button>
+      <button class="chip" data-e="shy"><span>☺️</span><em>害羞</em></button>
+      <button class="chip" data-e="surprised"><span>😲</span><em>惊讶</em></button>
+      <button class="chip" data-e="doubt"><span>🤔</span><em>疑惑</em></button>
+      <button class="chip" data-e="angry"><span>😠</span><em>生气</em></button>
+      <button class="chip" data-e="sad"><span>😢</span><em>难过</em></button>
+      <button class="chip" data-e="sleepy"><span>😴</span><em>困了</em></button>
+    </div>
+    <h2 class="sub">表情风格 <small>机器人上所有应用都会用这个</small></h2>
+    <div class="seg" id="faceStyle">
+      <button data-style="0">官方原版</button>
+      <button data-style="1">经典加强</button>
+      <button data-style="2">大眼萌系</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>特效 <small>3 秒后自动消失</small></h2>
+    <div class="grid">
+      <button class="chip" data-d="heart"><span>❤️</span><em>爱心</em></button>
+      <button class="chip" data-d="angry"><span>💢</span><em>冒火</em></button>
+      <button class="chip" data-d="sweat"><span>💦</span><em>流汗</em></button>
+      <button class="chip" data-d="shy"><span>😳</span><em>害羞</em></button>
+      <button class="chip" data-d="dizzy"><span>💫</span><em>头晕</em></button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>灯光</h2>
+    <div class="swatches">
+      <div class="sw offc" data-c="000000" title="关灯"></div>
+      <div class="sw" data-c="ff2020" style="background:#ff2020"></div>
+      <div class="sw" data-c="ff8a00" style="background:#ff8a00"></div>
+      <div class="sw" data-c="ffd400" style="background:#ffd400"></div>
+      <div class="sw" data-c="20e070" style="background:#20e070"></div>
+      <div class="sw" data-c="00d0ff" style="background:#00d0ff"></div>
+      <div class="sw" data-c="2060ff" style="background:#2060ff"></div>
+      <div class="sw" data-c="9a40ff" style="background:#9a40ff"></div>
+      <div class="sw" data-c="ff4fb0" style="background:#ff4fb0"></div>
+      <div class="sw" data-c="ffffff" style="background:#ffffff"></div>
+      <div class="sw" data-c="ffb070" style="background:#ffb070" title="暖光"></div>
+      <div class="sw pick" title="自选颜色"><input type="color" id="picker" value="#3fa9f5"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>让它说 <small>最多 60 个字</small></h2>
+    <form class="speak" id="speakForm">
+      <input id="speakText" maxlength="60" placeholder="输入一句话，显示在它的对话气泡里" autocomplete="off" enterkeyhint="send">
+      <button class="primary" type="submit">发送</button>
+    </form>
+    <div class="phrases" id="phrases">
+      <button>你好呀！</button><button>我饿了…</button><button>摸摸我的头</button><button>加油加油！</button><button>今天也要开心哦</button><button>别看我，我害羞</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>声音</h2>
+    <div class="vol"><span>🔈</span><input type="range" id="vol" min="0" max="100" step="5" value="60"><span id="volText">--</span></div>
+    <div class="grid">
+      <button class="chip" data-s="boop"><span>🤖</span><em>哔噗</em></button>
+      <button class="chip" data-s="click"><span>🔘</span><em>叮</em></button>
+      <button class="chip" data-s="start"><span>🎬</span><em>开场</em></button>
+      <button class="chip" data-s="success"><span>✅</span><em>成功</em></button>
+      <button class="chip" data-s="win"><span>🏆</span><em>胜利</em></button>
+      <button class="chip" data-s="fail"><span>💔</span><em>失败</em></button>
+      <button class="chip" data-s="caught"><span>🚨</span><em>警报</em></button>
+      <button class="chip" data-s="go"><span>⚡</span><em>出发</em></button>
+      <button class="chip" data-s="reveal"><span>✨</span><em>揭晓</em></button>
+      <button class="chip" data-s="mutouren"><span>🌲</span><em>木头人</em></button>
+      <button class="chip" data-s="radarping"><span>📡</span><em>声呐</em></button>
+      <button class="chip" data-s="alarm"><span>🚓</span><em>雷达警报</em></button>
+    </div>
+  </section>
+
+  <footer>同一个 Wi-Fi 下直连 StackChan，画面不经过云端<br>不用时请在机器人上退出遥控 · <span id="ip"></span></footer>
+</main>
+<div id="toast"></div>
+<script>
+(function(){
+'use strict';
+var $=function(id){return document.getElementById(id)};
+var each=function(sel,fn){Array.prototype.forEach.call(document.querySelectorAll(sel),fn)};
+var key=new URLSearchParams(location.search).get('k')||'';
+var host=location.hostname||'192.168.4.1';
+var cam=$('cam'),video=$('video'),vMsg=$('vMsg');
+var locked=false;
+
+function gate(text){locked=true;$('gateText').textContent=text;$('gate').classList.add('show');stopStream()}
+// Typed key (computer browser, or a phone camera that cannot read the QR): accept the 8 characters or the whole
+// address printed on the robot's card
+$('gateForm').addEventListener('submit',function(e){
+  e.preventDefault();
+  var v=$('gateKey').value.trim(),m=v.match(/[?&]k=([^&#\s]+)/);
+  v=(m?m[1]:v).toLowerCase().replace(/[^a-z0-9]/g,'');
+  if(v.length<4){$('gateKey').focus();return}
+  location.href=location.pathname+'?k='+encodeURIComponent(v);
+});
+if(!key){gate('请扫描机器人屏幕上的二维码打开');return}
+if(/MicroMessenger/i.test(navigator.userAgent))$('wechat').classList.add('show');
+
+function vibrate(){if(navigator.vibrate)navigator.vibrate(8)}
+var toastTimer=0;
+function toast(t){var e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(function(){e.classList.remove('show')},1800)}
+
+function request(method,path,params,body,timeoutMs){
+  var q=params?('?'+new URLSearchParams(params).toString()):'';
+  var ctl=window.AbortController?new AbortController():null;
+  var timer=setTimeout(function(){if(ctl)ctl.abort()},timeoutMs||3000);
+  var headers={'X-StackPet-Key':key};
+  if(body)headers['Content-Type']='text/plain;charset=utf-8';
+  var opt={method:method,headers:headers,cache:'no-store',signal:ctl?ctl.signal:undefined};
+  if(method==='POST')opt.body=body||'';
+  return fetch(path+q,opt).then(function(r){
+    clearTimeout(timer);
+    // Same message for a mistyped key and an expired one (the server cannot tell them apart)
+    if(r.status===403){gate('口令不对或已过期：请核对屏幕最下面的网址，或重新扫码');throw new Error('403')}
+    return r;
+  },function(e){clearTimeout(timer);throw e});
+}
+function api(path,params,body){
+  return request('POST',path,params,body).then(function(r){if(!r.ok)throw new Error(r.status);return r.json()})
+    .catch(function(e){if(!locked)toast('发送失败，检查一下网络');throw e});
+}
+function quiet(p){p.catch(function(){})}
+
+/* ---------- live video ---------- */
+var retryDelay=1000,retryTimer=0,streaming=false,lastStatus=null;
+var BUSY_RETRY_MS=15000;
+function streamUrl(){return 'http://'+host+':81/stream?k='+encodeURIComponent(key)+'&t='+Date.now()}
+function startStream(){
+  if(locked)return;
+  clearTimeout(retryTimer);
+  // The robot serves at most 2 viewers: do not knock on the door while it is full
+  if(lastStatus&&lastStatus.clients>=lastStatus.maxClients&&!video.classList.contains('live')){
+    showBusy();return;
+  }
+  streaming=true;
+  vMsg.textContent='画面连接中…';
+  video.classList.remove('live');
+  cam.src=streamUrl();
+}
+function showBusy(){
+  streaming=false;cam.removeAttribute('src');video.classList.remove('live');
+  vMsg.textContent='最多 2 台手机同时看画面，你仍然可以遥控';
+  retryTimer=setTimeout(startStream,BUSY_RETRY_MS);
+}
+function stopStream(){streaming=false;clearTimeout(retryTimer);cam.removeAttribute('src');video.classList.remove('live')}
+cam.addEventListener('load',function(){video.classList.add('live');retryDelay=1000});
+cam.addEventListener('error',function(){
+  if(!streaming||locked)return;
+  video.classList.remove('live');
+  // <img> does not expose the HTTP status: ask the robot whether it is full
+  quiet(request('GET','/api/status').then(function(r){return r.json()}).then(function(s){
+    lastStatus=s;
+    if(s.clients>=s.maxClients){showBusy();return}
+    if(!s.camera){vMsg.textContent='摄像头不可用，你仍然可以遥控';retryTimer=setTimeout(startStream,BUSY_RETRY_MS);return}
+    scheduleRetry();
+  },function(){scheduleRetry()}));
+});
+function scheduleRetry(){
+  vMsg.textContent='画面断开了，'+Math.round(retryDelay/1000)+' 秒后重连…';
+  retryTimer=setTimeout(startStream,retryDelay);
+  retryDelay=Math.min(retryDelay*2,8000);
+}
+document.addEventListener('visibilitychange',function(){if(document.hidden)stopStream();else startStream()});
+$('bRetry').onclick=function(){vibrate();retryDelay=1000;lastStatus=null;startStream()};
+var canFull=!!(video.requestFullscreen||video.webkitRequestFullscreen);
+if(!canFull)$('bFull').style.display='none';
+$('bFull').onclick=function(){
+  vibrate();
+  if(document.fullscreenElement){document.exitFullscreen();return}
+  if(video.requestFullscreen)video.requestFullscreen().catch(function(){toast('浏览器不支持全屏')});
+  else if(video.webkitRequestFullscreen)video.webkitRequestFullscreen();
+};
+
+/* ---------- photo: 3-2-1 on the robot (with fill light), then download ---------- */
+var shooting=false;
+function download(blob){
+  var d=new Date(),p=function(n){return(n<10?'0':'')+n};
+  var name='stackchan-'+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds())+'.jpg';
+  var url=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();
+  setTimeout(function(){URL.revokeObjectURL(url)},4000);
+}
+function countdown(n,done){
+  var c=$('count');
+  if(n===0){c.classList.remove('show');done();return}
+  c.textContent=n;c.classList.add('show');
+  setTimeout(function(){countdown(n-1,done)},1000);
+}
+function flash(){var f=$('flash');f.classList.add('on');setTimeout(function(){f.classList.remove('on')},60)}
+function fetchPhoto(id,deadline){
+  return request('GET','/photo.jpg',{id:id},null,3000).then(function(r){
+    if(r.ok)return r.blob();
+    if(Date.now()>deadline)throw new Error('timeout');
+    return new Promise(function(res){setTimeout(res,300)}).then(function(){return fetchPhoto(id,deadline)});
+  });
+}
+$('bShot').onclick=function(){
+  if(shooting)return;
+  vibrate();shooting=true;$('bShot').disabled=true;
+  api('/api/photo').then(function(res){
+    countdown(3,function(){
+      flash();
+      fetchPhoto(res.id,Date.now()+5000).then(function(b){download(b);toast('拍好啦 📸')})
+        .catch(function(){if(!locked)toast('拍照失败，再试一次')})
+        .then(function(){shooting=false;$('bShot').disabled=false});
+    });
+  },function(){shooting=false;$('bShot').disabled=false});
+};
+
+/* ---------- look pad ---------- */
+var pad=$('pad'),knob=$('knob');
+var target={x:0,y:-1},lastSent={x:9,y:9},sendTimer=0,lastSendAt=0,dragging=false;
+function placeKnob(){knob.style.left=((target.x+1)/2*100)+'%';knob.style.top=((1-(target.y+1)/2)*100)+'%'}
+function sendLook(force){
+  var now=Date.now();
+  if(!force&&now-lastSendAt<100){clearTimeout(sendTimer);sendTimer=setTimeout(function(){sendLook(true)},100-(now-lastSendAt));return}
+  if(Math.abs(target.x-lastSent.x)<0.01&&Math.abs(target.y-lastSent.y)<0.01)return;
+  lastSendAt=now;lastSent={x:target.x,y:target.y};
+  quiet(api('/api/look',{x:target.x.toFixed(3),y:target.y.toFixed(3),speed:dragging?750:550}));
+}
+function padPoint(e){
+  var r=pad.getBoundingClientRect();
+  var x=(e.clientX-r.left)/r.width*2-1,y=1-(e.clientY-r.top)/r.height*2;
+  target.x=Math.max(-1,Math.min(1,x));target.y=Math.max(-1,Math.min(1,y));
+  placeKnob();sendLook(false);
+}
+pad.addEventListener('pointerdown',function(e){dragging=true;pad.classList.add('drag');pad.setPointerCapture(e.pointerId);padPoint(e)});
+pad.addEventListener('pointermove',function(e){if(dragging)padPoint(e)});
+function endDrag(){if(!dragging)return;dragging=false;pad.classList.remove('drag');sendLook(true)}
+pad.addEventListener('pointerup',endDrag);pad.addEventListener('pointercancel',endDrag);
+placeKnob();
+function resetPad(){target={x:0,y:-1};placeKnob();lastSent={x:0,y:-1}}
+
+document.querySelector('[data-home]').onclick=function(){vibrate();resetPad();quiet(api('/api/home',{speed:500}))};
+each('[data-act]',function(b){
+  b.onclick=function(){vibrate();quiet(api('/api/action',{a:b.dataset.act}));if(b.dataset.act==='spin'||b.dataset.act==='dance')resetPad()};
+});
+
+/* ---------- emotions / decorators / sounds ---------- */
+each('[data-e]',function(b){
+  b.onclick=function(){
+    vibrate();
+    each('[data-e]',function(o){o.classList.toggle('sel',o===b)});
+    quiet(api('/api/emotion',{e:b.dataset.e}));
+  };
+});
+each('[data-d]',function(b){b.onclick=function(){vibrate();quiet(api('/api/decorator',{d:b.dataset.d}))}});
+
+/* ---------- face style (applies to every app on the robot) ---------- */
+var faceNames=['官方原版','经典加强','大眼萌系'],pendingFace=null,pendingFaceAt=0;
+function showFace(n){each('#faceStyle button',function(b){b.classList.toggle('sel',+b.dataset.style===n)})}
+each('#faceStyle button',function(b){
+  b.onclick=function(){
+    var n=+b.dataset.style;
+    if(b.classList.contains('sel'))return;
+    vibrate();showFace(n);pendingFace=n;pendingFaceAt=Date.now();
+    api('/api/face',{style:n}).then(function(){toast('换成「'+faceNames[n]+'」啦')},function(){pendingFace=null});
+  };
+});
+each('[data-s]',function(b){b.onclick=function(){vibrate();quiet(api('/api/sfx',{s:b.dataset.s}))}});
+var volInit=false;
+$('vol').addEventListener('input',function(e){$('volText').textContent=e.target.value});
+$('vol').addEventListener('change',function(e){vibrate();quiet(api('/api/volume',{v:e.target.value}))});
+
+/* ---------- lights ---------- */
+function sendColor(hex){
+  hex=hex.replace('#','');
+  quiet(api('/api/rgb',{r:parseInt(hex.substr(0,2),16),g:parseInt(hex.substr(2,2),16),b:parseInt(hex.substr(4,2),16)}));
+}
+each('.sw[data-c]',function(s){s.onclick=function(){vibrate();sendColor(s.dataset.c)}});
+var pickTimer=0;
+$('picker').addEventListener('input',function(e){clearTimeout(pickTimer);var v=e.target.value;pickTimer=setTimeout(function(){sendColor(v)},120)});
+
+/* ---------- speak ---------- */
+function speak(text){
+  text=(text||'').trim();
+  if(!text){toast('先写点什么吧');return}
+  quiet(api('/api/speak',null,text).then(function(){toast('它说：'+text)}));
+}
+$('speakForm').addEventListener('submit',function(e){e.preventDefault();vibrate();speak($('speakText').value);$('speakText').value=''});
+each('#phrases button',function(b){b.onclick=function(){vibrate();speak(b.textContent)}});
+
+/* ---------- status ---------- */
+var failures=0;
+function poll(){
+  if(locked)return;
+  request('GET','/api/status',null,null,2500).then(function(r){return r.json()}).then(function(s){
+    failures=0;lastStatus=s;
+    $('lost').classList.remove('show');
+    var c=$('pConn');c.className='pill on';c.innerHTML='<span class="dot"></span>已连接';
+    var bat=$('pBat');
+    bat.textContent=(s.charging?'⚡ ':'🔋 ')+(s.battery>=0?s.battery+'%':'--');
+    bat.classList.toggle('low',s.battery>=0&&s.battery<15&&!s.charging);
+    $('pFps').textContent='🎞 '+(s.streamFps>0?s.streamFps:s.fps).toFixed(1)+' fps';
+    $('vInfo').textContent=s.camera?('实时画面 · '+s.fps.toFixed(0)+' fps · '+Math.round(s.jpegBytes/1024)+' KB'):'摄像头不可用';
+    if(!s.camera)vMsg.textContent='摄像头不可用，你仍然可以遥控';
+    // The working link (with the key), e.g. to open the remote on a computer as well
+    $('ip').textContent=s.ip?('http://'+s.ip+'/?k='+key):'';
+    if(!volInit&&s.volume>=0){volInit=true;$('vol').value=s.volume;$('volText').textContent=s.volume}
+    // Follow the robot, except right after a tap (the switch takes one main loop round on the robot)
+    if(s.face_style>=0){
+      if(pendingFace!==null&&(s.face_style===pendingFace||Date.now()-pendingFaceAt>4000))pendingFace=null;
+      if(pendingFace===null)showFace(s.face_style);
+    }
+    // Some browsers fire no load event for MJPEG: trust the device counters as well
+    if(streaming&&cam.naturalWidth>0&&s.streamFps>0)video.classList.add('live');
+    if(streaming&&!document.hidden&&s.camera&&s.clients===0&&video.classList.contains('live'))startStream();
+  }).catch(function(){
+    if(locked)return;
+    if(++failures>=2){var c=$('pConn');c.className='pill off';c.innerHTML='<span class="dot"></span>连不上'}
+    if(failures>=3)$('lost').classList.add('show');
+  });
+}
+setInterval(poll,2000);poll();
+startStream();
+})();
+</script>
+</body>
+</html>

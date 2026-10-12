@@ -58,6 +58,14 @@
 
 #define TAG "StackChanCamera"
 
+// Number of V4L2 capture buffers for the DVP sensor (GC0308). With a single buffer the driver has nothing to
+// fill while the application copies the previous frame, so every other sensor frame is dropped (20 fps sensor ->
+// at most 10 fps). esp_video's DVP device uses the generic queued-buffer model and its buffers live in PSRAM
+// (DVP_MEM_CAPS), so 2 buffers only cost ~150 KB of PSRAM. Set to 1 to restore the original behaviour.
+#ifndef STACKCHAN_CAMERA_DVP_BUFFER_COUNT
+#define STACKCHAN_CAMERA_DVP_BUFFER_COUNT 2
+#endif
+
 #if defined(CONFIG_CAMERA_SENSOR_SWAP_PIXEL_BYTE_ORDER) || defined(CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP)
 #warning \
     "CAMERA_SENSOR_SWAP_PIXEL_BYTE_ORDER or CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP is enabled, which may cause image corruption in YUV422 format!"
@@ -281,7 +289,13 @@ StackChanCamera::StackChanCamera(const esp_video_init_config_t& config)
 
     // 申请缓冲并mmap
     struct v4l2_requestbuffers req = {};
-    req.count                      = strcmp(video_device_name, ESP_VIDEO_MIPI_CSI_DEVICE_NAME) == 0 ? 2 : 1;
+    if (strcmp(video_device_name, ESP_VIDEO_MIPI_CSI_DEVICE_NAME) == 0) {
+        req.count = 2;
+    } else if (strcmp(video_device_name, ESP_VIDEO_DVP_DEVICE_NAME) == 0) {
+        req.count = STACKCHAN_CAMERA_DVP_BUFFER_COUNT;
+    } else {
+        req.count = 1;
+    }
     req.type                       = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory                     = V4L2_MEMORY_MMAP;
     if (ioctl(video_fd_, VIDIOC_REQBUFS, &req) != 0) {
@@ -291,6 +305,8 @@ StackChanCamera::StackChanCamera(const esp_video_init_config_t& config)
         sensor_format_ = 0;
         return;
     }
+    ESP_LOGI(TAG, "%s: %lu capture buffer(s), %dx%d", video_device_name, (unsigned long)req.count, frame_.width,
+             frame_.height);
     mmap_buffers_.resize(req.count);
     for (uint32_t i = 0; i < req.count; i++) {
         struct v4l2_buffer buf = {};
@@ -415,6 +431,9 @@ bool StackChanCamera::Capture()
         }
         if (i == 2) {
             // 保存帧副本到PSRAM
+            // Capture() may replace frame_.data with buffers of other sizes (rotation, preview), so the next
+            // StreamCaptures() must not reuse it
+            frame_capacity_ = 0;
             if (frame_.data) {
                 heap_caps_free(frame_.data);
                 frame_.data   = nullptr;
@@ -870,27 +889,35 @@ bool StackChanCamera::StreamCaptures()
             return false;
         }
         {
-            // 保存帧副本到PSRAM
-            if (frame_.data) {
-                heap_caps_free(frame_.data);
-                frame_.data   = nullptr;
-                frame_.format = 0;
-            }
-            frame_.len  = buf.bytesused;
-            frame_.data = (uint8_t*)heap_caps_malloc(frame_.len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (!frame_.data) {
-                ESP_LOGE(TAG, "alloc frame copy failed: need allocate %lu bytes", buf.bytesused);
-                if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
-                    ESP_LOGE(TAG, "Cleanup: VIDIOC_QBUF failed");
+            // 保存帧副本到PSRAM. The copy buffer is reused between frames: allocating and freeing ~150 KB of PSRAM
+            // for every streamed frame was pure overhead. 64-byte alignment keeps it usable by esp_new_jpeg
+            // (needs 16) and cache-line friendly.
+            if (frame_.data == nullptr || frame_capacity_ < buf.bytesused) {
+                if (frame_.data) {
+                    heap_caps_free(frame_.data);
+                    frame_.data   = nullptr;
+                    frame_.format = 0;
                 }
-                return false;
+                frame_capacity_ = 0;
+                frame_.data =
+                    (uint8_t*)heap_caps_aligned_alloc(64, buf.bytesused, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!frame_.data) {
+                    ESP_LOGE(TAG, "alloc frame copy failed: need allocate %lu bytes", buf.bytesused);
+                    if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+                        ESP_LOGE(TAG, "Cleanup: VIDIOC_QBUF failed");
+                    }
+                    return false;
+                }
+                frame_capacity_ = buf.bytesused;
             }
+            frame_.len = buf.bytesused;
 
+            // Per-frame logging used to print a WARN line for every streamed frame
 #ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
-            ESP_LOGW(TAG, "mmap_buffers_[buf.index].length = %d, sensor_width = %d, sensor_height = %d",
+            ESP_LOGD(TAG, "mmap_buffers_[buf.index].length = %d, sensor_width = %d, sensor_height = %d",
                      mmap_buffers_[buf.index].length, sensor_width_, sensor_height_);
 #else
-            ESP_LOGW(TAG, "mmap_buffers_[buf.index].length = %d, frame.width = %d, frame.height = %d",
+            ESP_LOGD(TAG, "mmap_buffers_[buf.index].length = %d, frame.width = %d, frame.height = %d",
                      mmap_buffers_[buf.index].length, frame_.width, frame_.height);
 #endif  // CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
             ESP_LOG_BUFFER_HEXDUMP(TAG, mmap_buffers_[buf.index].start, MIN(mmap_buffers_[buf.index].length, 256),
@@ -965,6 +992,68 @@ bool StackChanCamera::StreamCaptures()
     }
 
     return true;
+}
+
+bool StackChanCamera::VisitFrame(const FrameVisitor& visitor)
+{
+#if defined(CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP) || defined(CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE)
+    // The frame has to be swapped / rotated before anybody can read it: use the copying path
+    if (!StreamCaptures()) {
+        return false;
+    }
+    visitor(frame_.data, frame_.len, frame_.width, frame_.height, frame_.format);
+    return true;
+#else
+    if (encoder_thread_.joinable()) {
+        encoder_thread_.join();
+    }
+
+    if (!streaming_on_ || video_fd_ < 0) {
+        return false;
+    }
+
+    v4l2_pix_fmt_t format = sensor_format_;
+    switch (sensor_format_) {
+        case V4L2_PIX_FMT_YUV422P:
+            // 这个格式是 422 YUYV，不是 planer (same as StreamCaptures)
+            format = V4L2_PIX_FMT_YUYV;
+            break;
+        case V4L2_PIX_FMT_RGB565:
+        case V4L2_PIX_FMT_RGB24:
+        case V4L2_PIX_FMT_YUYV:
+        case V4L2_PIX_FMT_GREY:
+            break;
+        default:
+            // Needs a conversion (e.g. RGB565X): use the copying path
+            if (!StreamCaptures()) {
+                return false;
+            }
+            visitor(frame_.data, frame_.len, frame_.width, frame_.height, frame_.format);
+            return true;
+    }
+
+    struct v4l2_buffer buf = {};
+    buf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory             = V4L2_MEMORY_MMAP;
+    if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "VIDIOC_DQBUF failed");
+        return false;
+    }
+
+    bool ok = buf.index < mmap_buffers_.size() && buf.bytesused > 0;
+    if (ok) {
+        // The buffer belongs to the application until it is queued again, so it can be read in place.
+        // With 2 capture buffers the driver keeps filling the other one meanwhile.
+        size_t size = MIN(static_cast<size_t>(buf.bytesused), mmap_buffers_[buf.index].length);
+        visitor(static_cast<const uint8_t*>(mmap_buffers_[buf.index].start), size, frame_.width, frame_.height,
+                format);
+    }
+
+    if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "VIDIOC_QBUF failed");
+    }
+    return ok;
+#endif
 }
 
 bool StackChanCamera::SetHMirror(bool enabled)

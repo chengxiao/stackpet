@@ -1,7 +1,22 @@
 diff --git a/main/application.cc b/main/application.cc
-index d69d43d..3b6f07e 100644
+index d69d43d..7940be6 100644
 --- a/main/application.cc
 +++ b/main/application.cc
+@@ -433,10 +433,10 @@ void Application::CheckNewVersion() {
+         retry_delay = 10; // Reset retry delay
+ 
+         if (ota_->HasNewVersion()) {
+-            if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
+-                return; // This line will never be reached after reboot
+-            }
+-            // If upgrade failed, continue to normal operation
++            // StackPet: this is a self-built firmware, never let the OTA server replace it automatically
++            // (that includes a server side "force" upgrade). Activation and server config continue below.
++            ESP_LOGW(TAG, "New firmware %s available, automatic upgrade disabled (StackPet custom firmware)",
++                     ota_->GetFirmwareVersion().c_str());
+         }
+ 
+         // No new version, mark the current version as valid
 @@ -610,33 +610,36 @@ void Application::InitializeProtocol() {
  }
  
@@ -245,6 +260,726 @@ index 3692e0c..7bfbc5c 100644
      
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
+diff --git a/main/audio/processors/afe_audio_processor.cc b/main/audio/processors/afe_audio_processor.cc
+index 15e9cc5..5a7a7db 100644
+--- a/main/audio/processors/afe_audio_processor.cc
++++ b/main/audio/processors/afe_audio_processor.cc
+@@ -1,5 +1,6 @@
+ #include "afe_audio_processor.h"
+ #include <esp_log.h>
++#include <esp_heap_caps.h>
+ 
+ #define PROCESSOR_RUNNING 0x01
+ 
+@@ -66,6 +67,13 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
+ 
+     afe_iface_ = esp_afe_handle_from_config(afe_config);
+     afe_data_ = afe_iface_->create_from_config(afe_config);
++    if (afe_data_ == nullptr) {
++        // StackPet: fail soft instead of a null pointer dereference in the task (internal RAM can be tight)
++        ESP_LOGE(TAG, "Failed to create the audio processor AFE (free internal RAM %u B)",
++                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
++        afe_config_free(afe_config);
++        return;
++    }
+     
+     xTaskCreate([](void* arg) {
+         auto this_ = (AfeAudioProcessor*)arg;
+diff --git a/main/audio/wake_words/custom_wake_word.cc b/main/audio/wake_words/custom_wake_word.cc
+index 982bbe9..fff0eae 100644
+--- a/main/audio/wake_words/custom_wake_word.cc
++++ b/main/audio/wake_words/custom_wake_word.cc
+@@ -1,9 +1,12 @@
+ #include "custom_wake_word.h"
++#include <esp_timer.h>
++#include <algorithm>
+ #include "audio_service.h"
+ #include "system_info.h"
+ #include "assets.h"
+ 
+ #include <esp_log.h>
++#include <esp_afe_config.h>
+ #include <esp_mn_iface.h>
+ #include <esp_mn_models.h>
+ #include <esp_mn_speech_commands.h>
+@@ -11,15 +14,41 @@
+ 
+ #define TAG "CustomWakeWord"
+ 
++#define DETECTION_RUNNING_EVENT     (1 << 0)
++#define DETECTION_EXIT_EVENT        (1 << 1)
++#define FETCH_TASK_EXITED_EVENT     (1 << 2)
++#define RECOGNIZE_TASK_EXITED_EVENT (1 << 3)
++
++// Task layout (measured on the CoreS3: quad PSRAM shared with flash, 32 KB data cache, ~40 KB free SRAM):
++// - MultiNet7 needs ~47 ms of CPU per 32 ms chunk here (ESP-SR benchmark: 11 ms), even alone on a core, so it
++//   cannot run continuously in real time. Fed directly, it let the AFE feed ring buffer overflow
++//   ("Ringbuffer of AFE(FEED) is full") and starved IDLE0 (task watchdog).
++// - So the AFE also runs VAD. The fetch task (cheap) drains the AFE in real time and queues only speech
++//   segments, including the AFE's pre-roll cache and a short tail. The recognize task runs MultiNet on the
++//   queued speech at the lowest priority on core 0 and yields regularly, catching up after each utterance.
++// - The AFE (AEC + VAD) task and the fetch task stay on core 1 above LVGL (priority 3), so they never starve.
++static constexpr uint32_t kFetchTaskStackSize = 4096;
++static constexpr UBaseType_t kFetchTaskPriority = 4;
++static constexpr BaseType_t kFetchTaskCore = 1;
++static constexpr uint32_t kRecognizeTaskStackSize = 4096;  // internal RAM; measured peak use ~1.5 KB (MN7 detect)
++static constexpr UBaseType_t kRecognizeTaskPriority = 1;
++static constexpr BaseType_t kRecognizeTaskCore = 0;
++static constexpr int kRecognizeYieldEveryChunks = 4;       // let IDLE0 run while catching up (task watchdog)
++static constexpr BaseType_t kAfeTaskCore = 1;
++static constexpr int kAfeTaskPriority = 5;
++static constexpr int64_t kSpeechTailUs = 400 * 1000;       // keep feeding MultiNet this long after VAD silence
++static constexpr size_t kMaxQueuedChunks = 94;             // ~3 s of 32 ms chunks: bounds the wake-up latency
++static constexpr size_t kTrimQueuedChunks = 40;            // on overflow keep only the newest ~1.3 s (hysteresis)
++static constexpr int64_t kLoadStatsPeriodUs = 60 * 1000 * 1000;
++
+ CustomWakeWord::CustomWakeWord()
+     : wake_word_pcm_(), wake_word_opus_() {
++    event_group_ = xEventGroupCreate();
++    speech_signal_ = xSemaphoreCreateBinary();
+ }
+ 
+ CustomWakeWord::~CustomWakeWord() {
+-    if (multinet_model_data_ != nullptr && multinet_ != nullptr) {
+-        multinet_->destroy(multinet_model_data_);
+-        multinet_model_data_ = nullptr;
+-    }
++    ReleaseEngines();
+ 
+     if (wake_word_encode_task_stack_ != nullptr) {
+         heap_caps_free(wake_word_encode_task_stack_);
+@@ -29,9 +58,57 @@ CustomWakeWord::~CustomWakeWord() {
+         heap_caps_free(wake_word_encode_task_buffer_);
+     }
+ 
+-    if (models_ != nullptr) {
++    vSemaphoreDelete(speech_signal_);
++    vEventGroupDelete(event_group_);
++}
++
++void CustomWakeWord::ReleaseEngines() {
++    // The AudioService may replace the wake word (e.g. after new assets are applied), and a failed Initialize()
++    // is retried: stop both tasks before the AFE and MultiNet they use are destroyed
++    EventBits_t wait_bits = 0;
++    if (fetch_task_ != nullptr) {
++        wait_bits |= FETCH_TASK_EXITED_EVENT;
++    }
++    if (recognize_task_ != nullptr) {
++        wait_bits |= RECOGNIZE_TASK_EXITED_EVENT;
++    }
++    if (wait_bits != 0) {
++        xEventGroupSetBits(event_group_, DETECTION_EXIT_EVENT);
++        xSemaphoreGive(speech_signal_);
++        // A MultiNet chunk in progress can take ~150 ms worst case
++        EventBits_t bits = xEventGroupWaitBits(event_group_, wait_bits, pdFALSE, pdTRUE, pdMS_TO_TICKS(3000));
++        if ((bits & wait_bits) != wait_bits) {
++            // A task may still be using the AFE/MultiNet: leaking them is the only safe option (EXIT stays set)
++            ESP_LOGE(TAG, "Wake word tasks did not exit in time, keeping their engines alive");
++            engines_leaked_ = true;
++            fetch_task_ = nullptr;
++            recognize_task_ = nullptr;
++            return;
++        }
++        fetch_task_ = nullptr;
++        recognize_task_ = nullptr;
++    }
++
++    if (afe_data_ != nullptr) {
++        afe_iface_->destroy(afe_data_);
++        afe_data_ = nullptr;
++    }
++
++    if (multinet_model_data_ != nullptr && multinet_ != nullptr) {
++        multinet_->destroy(multinet_model_data_);
++        multinet_model_data_ = nullptr;
++    }
++
++    // Only release the model list if it was loaded here; a list passed to Initialize() belongs to the caller
++    if (models_ != nullptr && owns_models_) {
+         esp_srmodel_deinit(models_);
+     }
++    models_ = nullptr;
++    owns_models_ = false;
++
++    ClearSpeechQueue();
++    pending_samples_.clear();
++    xEventGroupClearBits(event_group_, DETECTION_EXIT_EVENT | FETCH_TASK_EXITED_EVENT | RECOGNIZE_TASK_EXITED_EVENT);
+ }
+ 
+ void CustomWakeWord::ParseWakenetModelConfig() {
+@@ -83,18 +160,33 @@ void CustomWakeWord::ParseWakenetModelConfig() {
+ 
+ 
+ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
++    // AudioService retries Initialize() every time it returns to idle until it succeeds: never build a second
++    // MultiNet/AFE on top of the first one, and clean up a half-finished attempt (see ReleaseEngines()).
++    if (fetch_task_ != nullptr && recognize_task_ != nullptr) {
++        return true;
++    }
++    if (engines_leaked_) {
++        return false;  // a previous instance's tasks never exited: do not build a second set on top of them
++    }
++    ReleaseEngines();
++    if (engines_leaked_) {
++        return false;
++    }
++
+     codec_ = codec;
+     commands_.clear();
+ 
+     if (models_list == nullptr) {
+         language_ = "cn";
+         models_ = esp_srmodel_init("model");
++        owns_models_ = true;
+ #ifdef CONFIG_CUSTOM_WAKE_WORD
+         threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
+         commands_.push_back({CONFIG_CUSTOM_WAKE_WORD, CONFIG_CUSTOM_WAKE_WORD_DISPLAY, "wake"});
+ #endif
+     } else {
+         models_ = models_list;
++        owns_models_ = false;
+         ParseWakenetModelConfig();
+     }
+ 
+@@ -116,15 +208,113 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list)
+     }
+ 
+     multinet_ = esp_mn_handle_from_name(mn_name_);
+-    multinet_model_data_ = multinet_->create(mn_name_, duration_);
++    multinet_model_data_ = multinet_ != nullptr ? multinet_->create(mn_name_, duration_) : nullptr;
++    if (multinet_model_data_ == nullptr) {
++        ESP_LOGE(TAG, "Failed to create multinet %s (out of memory?)", mn_name_);
++        ReleaseEngines();
++        return false;
++    }
+     multinet_->set_det_threshold(multinet_model_data_, threshold_);
+     esp_mn_commands_clear();
+     for (int i = 0; i < commands_.size(); i++) {
+         esp_mn_commands_add(i + 1, commands_[i].command.c_str());
+     }
+     esp_mn_commands_update();
+-    
++
+     multinet_->print_active_speech_commands(multinet_model_data_);
++    if (commands_.empty()) {
++        ESP_LOGW(TAG, "No custom wake word configured (index.json multinet_model.commands is empty)");
++    }
++
++    mn_chunk_ = multinet_->get_samp_chunksize(multinet_model_data_);
++    if (!InitializeAfe()) {
++        ReleaseEngines();
++        return false;
++    }
++
++    BaseType_t created = xTaskCreatePinnedToCore([](void* arg) {
++        auto this_ = (CustomWakeWord*)arg;
++        this_->RecognizeTask();
++        xEventGroupSetBits(this_->event_group_, RECOGNIZE_TASK_EXITED_EVENT);
++        vTaskDelete(NULL);
++    }, "wake_word_mn", kRecognizeTaskStackSize, this, kRecognizeTaskPriority, &recognize_task_,
++       kRecognizeTaskCore);
++    if (created != pdPASS) {
++        recognize_task_ = nullptr;
++        ESP_LOGE(TAG, "Failed to create the recognize task");
++        ReleaseEngines();
++        return false;
++    }
++
++    created = xTaskCreatePinnedToCore([](void* arg) {
++        auto this_ = (CustomWakeWord*)arg;
++        this_->FetchTask();
++        xEventGroupSetBits(this_->event_group_, FETCH_TASK_EXITED_EVENT);
++        vTaskDelete(NULL);
++    }, "wake_word_fetch", kFetchTaskStackSize, this, kFetchTaskPriority, &fetch_task_, kFetchTaskCore);
++    if (created != pdPASS) {
++        fetch_task_ = nullptr;
++        ESP_LOGE(TAG, "Failed to create the fetch task");
++        ReleaseEngines();
++        return false;
++    }
++
++    ESP_LOGI(TAG, "Custom wake word ready: model %s, language %s, threshold %.2f, %d command(s)%s%s",
++             mn_name_, language_.c_str(), threshold_, (int)commands_.size(),
++             commands_.empty() ? "" : ", wake word: ", commands_.empty() ? "" : commands_.front().command.c_str());
++    return true;
++}
++
++bool CustomWakeWord::InitializeAfe() {
++    // Same front-end as AfeWakeWord: microphone channels first, then the speaker reference channel
++    int ref_num = codec_->input_reference() ? 1 : 0;
++    std::string input_format;
++    for (int i = 0; i < codec_->input_channels() - ref_num; i++) {
++        input_format.push_back('M');
++    }
++    for (int i = 0; i < ref_num; i++) {
++        input_format.push_back('R');
++    }
++
++    afe_config_t* afe_config = afe_config_init(input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
++    if (afe_config == nullptr) {
++        ESP_LOGE(TAG, "Failed to create the AFE config");
++        return false;
++    }
++    // No WakeNet: MultiNet is the wake word engine here
++    afe_config->wakenet_init = false;
++    afe_config->wakenet_model_name = nullptr;
++    afe_config->wakenet_model_name_2 = nullptr;
++    // Cancel the robot's own speaker output (AI voice, sound effects, music) using the reference channel
++    afe_config->aec_init = codec_->input_reference();
++    afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
++    // VAD gates MultiNet (see the task layout comment). Mode 1 let steady room noise (TV, music) count as speech
++    // ~60% of the time and kept MultiNet saturated, hence the stricter mode 3. The AFE pre-roll cache
++    // (vad_delay_ms) restores the frames buffered before speech was confirmed, so the first syllable is kept.
++    afe_config->vad_init = true;
++    afe_config->vad_mode = VAD_MODE_3;
++    afe_config->vad_min_speech_ms = 96;
++    afe_config->vad_min_noise_ms = 256;
++    afe_config->afe_perferred_core = kAfeTaskCore;
++    afe_config->afe_perferred_priority = kAfeTaskPriority;
++    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
++    // Noise suppression / AGC keep the ESP-SR speech recognition defaults (AFE_TYPE_SR is tuned for
++    // recognition and leaves out the nonlinear suppression used for voice calls)
++    afe_config = afe_config_check(afe_config);
++
++    afe_iface_ = esp_afe_handle_from_config(afe_config);
++    afe_data_ = afe_iface_ != nullptr ? afe_iface_->create_from_config(afe_config) : nullptr;
++    if (afe_data_ == nullptr) {
++        ESP_LOGE(TAG, "Failed to create the AFE");
++        afe_config_free(afe_config);
++        return false;
++    }
++
++    ESP_LOGI(TAG, "AFE ready: input %s, aec %d, se %d, ns %d, agc %d, vad %d, feed %d, fetch %d, multinet chunk %d",
++             input_format.c_str(), afe_config->aec_init, afe_config->se_init, afe_config->ns_init,
++             afe_config->agc_init, afe_config->vad_init, afe_iface_->get_feed_chunksize(afe_data_),
++             afe_iface_->get_fetch_chunksize(afe_data_), multinet_->get_samp_chunksize(multinet_model_data_));
++    afe_config_free(afe_config);
+     return true;
+ }
+ 
+@@ -133,80 +323,268 @@ void CustomWakeWord::OnWakeWordDetected(std::function<void(const std::string& wa
+ }
+ 
+ void CustomWakeWord::Start() {
+-    running_ = true;
++    generation_++;
++    ClearSpeechQueue();
++    clean_multinet_ = true;
++    xEventGroupSetBits(event_group_, DETECTION_RUNNING_EVENT);
+ }
+ 
+ void CustomWakeWord::Stop() {
+-    running_ = false;
++    generation_++;
++    xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
+ 
+-    std::lock_guard<std::mutex> lock(input_buffer_mutex_);
+-    input_buffer_.clear();
++    {
++        std::lock_guard<std::mutex> lock(input_buffer_mutex_);
++        if (afe_data_ != nullptr) {
++            afe_iface_->reset_buffer(afe_data_);
++        }
++        input_buffer_.clear();
++    }
++    ClearSpeechQueue();
++    clean_multinet_ = true;
++}
++
++void CustomWakeWord::ClearSpeechQueue() {
++    std::lock_guard<std::mutex> lock(speech_mutex_);
++    speech_queue_.clear();
++}
++
++void CustomWakeWord::QueueSpeech(const int16_t* samples, size_t count, bool end_of_segment) {
++    // Only called by the fetch task: pending_samples_ needs no lock
++    pending_samples_.insert(pending_samples_.end(), samples, samples + count);
++    size_t dropped = 0;
++    const uint32_t generation = generation_.load();
++    {
++        std::lock_guard<std::mutex> lock(speech_mutex_);
++        while (pending_samples_.size() >= (size_t)mn_chunk_) {
++            SpeechChunk chunk;
++            chunk.pcm.assign(pending_samples_.begin(), pending_samples_.begin() + mn_chunk_);
++            chunk.generation = generation;
++            pending_samples_.erase(pending_samples_.begin(), pending_samples_.begin() + mn_chunk_);
++            speech_queue_.push_back(std::move(chunk));
++        }
++        if (end_of_segment) {
++            // Drop the partial tail (< 32 ms of trailing silence) and close the utterance
++            pending_samples_.clear();
++            if (!speech_queue_.empty()) {
++                speech_queue_.back().end_of_segment = true;
++            }
++        }
++        // Bound the latency: MultiNet is slower than real time, never let it fall more than ~3 s behind.
++        // Trim with hysteresis (down to the newest kTrimQueuedChunks) and reset MultiNet once: dropping one
++        // chunk per fetch and resetting each time would leave MultiNet unable to ever hear a whole phrase.
++        if (speech_queue_.size() > kMaxQueuedChunks) {
++            dropped = speech_queue_.size() - kTrimQueuedChunks;
++            speech_queue_.erase(speech_queue_.begin(), speech_queue_.begin() + dropped);
++        }
++    }
++    if (dropped > 0) {
++        clean_multinet_ = true;
++        dropped_since_log_ += dropped;
++    }
++    int64_t now = esp_timer_get_time();
++    if (dropped_since_log_ > 0 && now - last_drop_log_us_ >= 1000 * 1000) {
++        ESP_LOGW(TAG, "MultiNet backlog full, dropped %d chunk(s) of speech", (int)dropped_since_log_);
++        dropped_since_log_ = 0;
++        last_drop_log_us_  = now;
++    }
++    xSemaphoreGive(speech_signal_);
+ }
+ 
+ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
+-    if (multinet_model_data_ == nullptr) {
++    if (afe_data_ == nullptr) {
+         return;
+     }
+ 
+     std::lock_guard<std::mutex> lock(input_buffer_mutex_);
+     // Check running state inside lock to avoid TOCTOU race with Stop()
+-    if (!running_) {
++    if (!(xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT)) {
+         return;
+     }
+ 
+-    // If input channels is 2, we need to fetch the left channel data
+-    if (codec_->input_channels() == 2) {
+-        for (size_t i = 0; i < data.size(); i += 2) {
+-            input_buffer_.push_back(data[i]);
++    // Interleaved microphone + reference samples, exactly what the AFE expects
++    input_buffer_.insert(input_buffer_.end(), data.begin(), data.end());
++    size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * codec_->input_channels();
++    while (input_buffer_.size() >= chunk_size) {
++        afe_iface_->feed(afe_data_, input_buffer_.data());
++        input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunk_size);
++    }
++}
++
++size_t CustomWakeWord::GetFeedSize() {
++    if (afe_data_ == nullptr) {
++        return 0;
++    }
++    return afe_iface_->get_feed_chunksize(afe_data_);
++}
++
++void CustomWakeWord::FetchTask() {
++    ESP_LOGI(TAG, "Fetch task started (VAD gated, multinet chunk %d)", mn_chunk_);
++    bool in_speech = false;
++    int64_t last_speech_us = 0;
++
++    while (true) {
++        EventBits_t bits = xEventGroupWaitBits(event_group_, DETECTION_RUNNING_EVENT | DETECTION_EXIT_EVENT,
++                                               pdFALSE, pdFALSE, portMAX_DELAY);
++        if (bits & DETECTION_EXIT_EVENT) {
++            break;
+         }
+-    } else {
+-        input_buffer_.insert(input_buffer_.end(), data.begin(), data.end());
+-    }
+-    
+-    int chunksize = multinet_->get_samp_chunksize(multinet_model_data_);
+-    while (input_buffer_.size() >= chunksize) {
+-        std::vector<int16_t> chunk(input_buffer_.begin(), input_buffer_.begin() + chunksize);
+-        StoreWakeWordData(chunk);
+-        
+-        esp_mn_state_t mn_state = multinet_->detect(multinet_model_data_, chunk.data());
+-        
+-        if (mn_state == ESP_MN_STATE_DETECTED) {
+-            esp_mn_results_t *mn_result = multinet_->get_results(multinet_model_data_);
+-            for (int i = 0; i < mn_result->num && running_; i++) {
+-                ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f", 
+-                        mn_result->command_id[i], mn_result->string, mn_result->prob[i]);
+-                auto& command = commands_[mn_result->command_id[i] - 1];
+-                if (command.action == "wake") {
++
++        // Bounded wait so a stop/exit request is noticed even when no audio is being fed
++        auto res = afe_iface_->fetch_with_delay(afe_data_, pdMS_TO_TICKS(100));
++        bits = xEventGroupGetBits(event_group_);
++        if (bits & DETECTION_EXIT_EVENT) {
++            break;
++        }
++        if (!(bits & DETECTION_RUNNING_EVENT)) {
++            // Stopped while waiting: drop the stale audio and any half-finished utterance
++            in_speech = false;
++            pending_samples_.clear();
++            continue;
++        }
++        if (res == nullptr || res->ret_value == ESP_FAIL || res->data == nullptr) {
++            continue;
++        }
++
++        size_t samples = res->data_size / sizeof(int16_t);
++        StoreWakeWordData(std::vector<int16_t>(res->data, res->data + samples));
++
++        int64_t now = esp_timer_get_time();
++        bool speech = res->vad_state == VAD_SPEECH;
++        if (speech) {
++            if (!in_speech) {
++                in_speech = true;
++                pending_samples_.clear();
++                // Frames the AFE buffered before it confirmed speech: without them the first syllable is lost
++                if (res->vad_cache_size > 0 && res->vad_cache != nullptr) {
++                    QueueSpeech(res->vad_cache, res->vad_cache_size / sizeof(int16_t), false);
++                }
++            }
++            last_speech_us = now;
++        }
++        if (in_speech) {
++            bool segment_done = !speech && now - last_speech_us >= kSpeechTailUs;
++            QueueSpeech(res->data, samples, segment_done);
++            if (segment_done) {
++                in_speech = false;
++            }
++        }
++    }
++
++    ESP_LOGI(TAG, "Fetch task exit");
++}
++
++void CustomWakeWord::RecognizeTask() {
++    ESP_LOGI(TAG, "Recognize task started");
++    int64_t stats_start_us  = esp_timer_get_time();
++    int64_t detect_total_us = 0;
++    int64_t detect_max_us   = 0;
++    int detect_count        = 0;
++    size_t backlog_max      = 0;
++    int chunks_since_yield  = 0;
++
++    while (true) {
++        if (xEventGroupGetBits(event_group_) & DETECTION_EXIT_EVENT) {
++            break;
++        }
++
++        SpeechChunk chunk;
++        bool have_chunk = false;
++        size_t backlog  = 0;
++        {
++            std::lock_guard<std::mutex> lock(speech_mutex_);
++            if (!speech_queue_.empty()) {
++                chunk = std::move(speech_queue_.front());
++                speech_queue_.pop_front();
++                have_chunk = true;
++                backlog    = speech_queue_.size();
++            }
++        }
++        if (!have_chunk) {
++            chunks_since_yield = 0;
++            xSemaphoreTake(speech_signal_, pdMS_TO_TICKS(100));
++            continue;
++        }
++        backlog_max = std::max(backlog_max, backlog);
++
++        if (clean_multinet_.exchange(false)) {
++            multinet_->clean(multinet_model_data_);
++        }
++        if (chunk.generation != generation_.load()) {
++            continue;  // queued before the last Start()/Stop(): stale audio
++        }
++
++        int64_t detect_start_us = esp_timer_get_time();
++        esp_mn_state_t mn_state = multinet_->detect(multinet_model_data_, chunk.pcm.data());
++        int64_t detect_us = esp_timer_get_time() - detect_start_us;
++        detect_total_us += detect_us;
++        detect_max_us = std::max(detect_max_us, detect_us);
++        detect_count++;
++
++        bool woke = false;
++        bool current = chunk.generation == generation_.load() &&
++                       (xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT);
++        if (mn_state == ESP_MN_STATE_DETECTED && !current) {
++            // Detection was stopped (e.g. a button started the conversation) while this chunk was being analysed
++            ESP_LOGI(TAG, "Ignoring a wake word result from stale audio");
++            multinet_->clean(multinet_model_data_);
++        } else if (mn_state == ESP_MN_STATE_DETECTED) {
++            esp_mn_results_t* mn_result = multinet_->get_results(multinet_model_data_);
++            for (int i = 0; i < mn_result->num; i++) {
++                int command_id = mn_result->command_id[i];
++                ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f (threshold %.2f), "
++                         "backlog %d chunk(s)", command_id, mn_result->string, mn_result->prob[i], threshold_,
++                         (int)backlog);
++                if (command_id < 1 || command_id > (int)commands_.size()) {
++                    continue;
++                }
++                auto& command = commands_[command_id - 1];
++                if (command.action == "wake" && !woke) {
+                     last_detected_wake_word_ = command.text;
+-                    running_ = false;
+-                    input_buffer_.clear();
+-                    
+-                    if (wake_word_detected_callback_) {
+-                        wake_word_detected_callback_(last_detected_wake_word_);
+-                    }
++                    woke = true;
+                 }
+             }
+             multinet_->clean(multinet_model_data_);
+-        } else if (mn_state == ESP_MN_STATE_TIMEOUT) {
+-            ESP_LOGD(TAG, "Command word detection timeout, cleaning state");
++        } else if (mn_state == ESP_MN_STATE_TIMEOUT || chunk.end_of_segment) {
+             multinet_->clean(multinet_model_data_);
+         }
+-        
+-        if (!running_) {
+-            break;
++
++        if (woke) {
++            Stop();
++            if (wake_word_detected_callback_) {
++                wake_word_detected_callback_(last_detected_wake_word_);
++            }
+         }
+-        input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunksize);
+-    }
+-}
+ 
+-size_t CustomWakeWord::GetFeedSize() {
+-    if (multinet_model_data_ == nullptr) {
+-        return 0;
++        if (esp_timer_get_time() - stats_start_us >= kLoadStatsPeriodUs) {
++            // One chunk is 32 ms of audio: above that MultiNet only keeps up thanks to the VAD gate
++            ESP_LOGI(TAG, "MultiNet load: %d chunks, detect avg %.1f ms, max %.1f ms, max backlog %d chunk(s), "
++                     "stack free: mn %u B, fetch %u B", detect_count, detect_total_us / 1000.0 / detect_count,
++                     detect_max_us / 1000.0, (int)backlog_max,
++                     (unsigned)(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)),
++                     (unsigned)(fetch_task_ != nullptr ? uxTaskGetStackHighWaterMark(fetch_task_) * sizeof(StackType_t) : 0));
++            stats_start_us  = esp_timer_get_time();
++            detect_total_us = 0;
++            detect_max_us   = 0;
++            detect_count    = 0;
++            backlog_max     = 0;
++        }
++
++        if (++chunks_since_yield >= kRecognizeYieldEveryChunks) {
++            chunks_since_yield = 0;
++            vTaskDelay(1);
++        }
+     }
+-    return multinet_->get_samp_chunksize(multinet_model_data_);
++
++    ESP_LOGI(TAG, "Recognize task exit");
+ }
+ 
+ void CustomWakeWord::StoreWakeWordData(const std::vector<int16_t>& data) {
++#if !CONFIG_SEND_WAKE_WORD_DATA
++    // The wake word audio is never sent to the server: keeping it would allocate 1 KB every 32 ms for nothing
++    (void)data;
++    return;
++#endif
+     // store audio data to wake_word_pcm_
+     wake_word_pcm_.push_back(data);
+     // keep about 2 seconds of data, detect duration is 30ms (sample_rate == 16000, chunksize == 512)
+@@ -216,6 +594,15 @@ void CustomWakeWord::StoreWakeWordData(const std::vector<int16_t>& data) {
+ }
+ 
+ void CustomWakeWord::EncodeWakeWordData() {
++#if !CONFIG_SEND_WAKE_WORD_DATA
++    // Nothing is ever popped (PopWakeWordPacket is only used with CONFIG_SEND_WAKE_WORD_DATA). Skipping the encode
++    // task also avoids allocating an Opus encoder right when the conversation starts and RAM is the tightest.
++    std::lock_guard<std::mutex> lock(wake_word_mutex_);
++    wake_word_opus_.clear();
++    wake_word_opus_.push_back(std::vector<uint8_t>());
++    wake_word_cv_.notify_all();
++    return;
++#endif
+     const size_t stack_size = 4096 * 7;
+     wake_word_opus_.clear();
+     if (wake_word_encode_task_stack_ == nullptr) {
+diff --git a/main/audio/wake_words/custom_wake_word.h b/main/audio/wake_words/custom_wake_word.h
+index 645ad1b..7ff4922 100644
+--- a/main/audio/wake_words/custom_wake_word.h
++++ b/main/audio/wake_words/custom_wake_word.h
+@@ -2,10 +2,16 @@
+ #define CUSTOM_WAKE_WORD_H
+ 
+ #include <esp_attr.h>
++#include <esp_afe_sr_models.h>
+ #include <esp_mn_iface.h>
+ #include <esp_mn_models.h>
+ #include <model_path.h>
+ 
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++#include <freertos/event_groups.h>
++#include <freertos/semphr.h>
++
+ #include <deque>
+ #include <string>
+ #include <vector>
+@@ -17,6 +23,12 @@
+ #include "audio_codec.h"
+ #include "wake_word.h"
+ 
++// Custom wake word on MultiNet (command word model). The microphone audio first goes through the ESP-SR AFE
++// (echo cancellation against the speaker reference channel + voice activity detection). A light fetch task
++// drains the AFE in real time and queues only the speech segments (with the AFE's pre-roll cache); a separate
++// low priority task runs MultiNet on the queued speech. On the CoreS3 (quad PSRAM) MultiNet7 needs ~47 ms of CPU
++// per 32 ms of audio, so it cannot listen continuously in real time: gating it with VAD keeps the AFE from
++// overflowing and lets MultiNet catch up after each utterance (bounded backlog, see kMaxQueuedChunks).
+ class CustomWakeWord : public WakeWord {
+ public:
+     CustomWakeWord();
+@@ -43,16 +55,42 @@ private:
+     esp_mn_iface_t* multinet_ = nullptr;
+     model_iface_data_t* multinet_model_data_ = nullptr;
+     srmodel_list_t *models_ = nullptr;
++    bool owns_models_ = false;
+     char* mn_name_ = nullptr;
+     std::string language_ = "cn";
+     int duration_ = 3000;
+     float threshold_ = 0.2;
+     std::deque<Command> commands_;
+- 
++
++    // AFE front-end
++    const esp_afe_sr_iface_t* afe_iface_ = nullptr;
++    esp_afe_sr_data_t* afe_data_ = nullptr;
++    EventGroupHandle_t event_group_ = nullptr;
++    TaskHandle_t fetch_task_ = nullptr;
++    TaskHandle_t recognize_task_ = nullptr;
++    std::atomic<bool> clean_multinet_ = false;
++    // Bumped by Start()/Stop(): a chunk queued (or a result produced) under an older generation is stale and
++    // must never trigger a wake-up, e.g. when the conversation was started by a button meanwhile
++    std::atomic<uint32_t> generation_ = 0;
++    bool engines_leaked_ = false;  // tasks did not exit in time: their AFE/MultiNet were intentionally not freed
++
++    // Speech queued by the fetch task for the recognize task, one MultiNet chunk per entry
++    struct SpeechChunk {
++        std::vector<int16_t> pcm;
++        bool end_of_segment = false;  // the utterance ended after this chunk: reset MultiNet
++        uint32_t generation = 0;      // generation_ when the chunk was queued
++    };
++    size_t dropped_since_log_ = 0;    // fetch task only
++    int64_t last_drop_log_us_ = 0;    // fetch task only
++    std::deque<SpeechChunk> speech_queue_;
++    std::mutex speech_mutex_;
++    SemaphoreHandle_t speech_signal_ = nullptr;
++    std::vector<int16_t> pending_samples_;  // fetch task only: samples not yet forming a full chunk
++    int mn_chunk_ = 512;
++
+     std::function<void(const std::string& wake_word)> wake_word_detected_callback_;
+     AudioCodec* codec_ = nullptr;
+     std::string last_detected_wake_word_;
+-    std::atomic<bool> running_ = false;
+     std::vector<int16_t> input_buffer_;
+     std::mutex input_buffer_mutex_;
+ 
+@@ -64,6 +102,12 @@ private:
+     std::mutex wake_word_mutex_;
+     std::condition_variable wake_word_cv_;
+ 
++    bool InitializeAfe();
++    void ReleaseEngines();
++    void FetchTask();
++    void RecognizeTask();
++    void QueueSpeech(const int16_t* samples, size_t count, bool end_of_segment);
++    void ClearSpeechQueue();
+     void StoreWakeWordData(const std::vector<int16_t>& data);
+     void ParseWakenetModelConfig();
+ };
 diff --git a/main/boards/common/i2c_device.cc b/main/boards/common/i2c_device.cc
 index 835997d..ea50d51 100644
 --- a/main/boards/common/i2c_device.cc

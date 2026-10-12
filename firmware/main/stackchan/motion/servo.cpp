@@ -123,6 +123,15 @@ void Servo::stop_motion_at_angle(int angle)
     _snap_to_target_on_rest = false;
 }
 
+void Servo::begin_rotation()
+{
+    // The snap to the target once the animation is at rest would come in the next update() if the animation only
+    // came to rest now, and put the servo back in position mode. Only drop that: teleporting the animation (as
+    // stop_motion_at_angle() does) restarts it, and its next step writes a position too. A move still running
+    // ends the wheel mode as before, so callers wait for !isMoving() first.
+    _snap_to_target_on_rest = false;
+}
+
 uitk::SpringOptions_t Servo::map_speed_to_spring_options(int speed)
 {
     speed = uitk::clamp(speed, 0, 1000);

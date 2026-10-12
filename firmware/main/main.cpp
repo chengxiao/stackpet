@@ -39,6 +39,12 @@ extern "C" void app_main(void)
         GetMooncake().installApp(std::make_unique<AppEzdata>());
         GetMooncake().installApp(std::make_unique<AppDance>());
         GetMooncake().installApp(std::make_unique<AppSetup>());
+        // StackPet apps: keep them after AppSetup so the official warm-reboot indices (0-6) stay unchanged
+        GetMooncake().installApp(std::make_unique<AppRemote>());
+        GetMooncake().installApp(std::make_unique<AppFreeze>());
+        GetMooncake().installApp(std::make_unique<AppSpin>());
+        GetMooncake().installApp(std::make_unique<AppFace>());
+        GetMooncake().installApp(std::make_unique<AppRadar>());
 
         // Main loop
         while (1) {

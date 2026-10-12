@@ -32,6 +32,7 @@ void Hal::init()
     }
     ESP_ERROR_CHECK(ret);
 
+    servo_early_stop();
     xiaozhi_board_init();
     xiaozhi_mcp_init();
     head_touch_init();

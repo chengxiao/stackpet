@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <stackpet/face/face.h>
 
 using namespace mooncake;
 using namespace smooth_ui_toolkit::lvgl_cpp;
@@ -72,8 +73,7 @@ void AppEspnowControl::onOpen()
 
     auto& stackchan = GetStackChan();
 
-    auto avatar = std::make_unique<avatar::DefaultAvatar>();
-    avatar->init(lv_screen_active());
+    auto avatar = stackpet::face::create(lv_screen_active());
     stackchan.attachAvatar(std::move(avatar));
 
     stackchan.clearModifiers();
