@@ -125,3 +125,25 @@ void espnow_send_data(uint8_t *pkt, size_t len)
     espnow_frame_head_t frame_head = ESPNOW_FRAME_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(espnow_send(ESPNOW_DATA_TYPE_DATA, ESPNOW_ADDR_BROADCAST, pkt, len, &frame_head, portMAX_DELAY));
 }
+
+/* StackPet: once on every channel the country allows (1..11 with the default country, "01"): the espnow component
+ * switches through them. It does not switch back here (CONFIG_ESPNOW_AUTO_RESTORE_CHANNEL is off in this sdkconfig):
+ * done here, else the remote would stay on the last one. Three rounds instead of ten. A failure only goes to the log:
+ * the packet went out on this channel already */
+void espnow_send_everywhere(uint8_t *pkt, size_t len)
+{
+    uint8_t primary           = 0;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&primary, &second);
+
+    espnow_frame_head_t frame_head = ESPNOW_FRAME_CONFIG_DEFAULT();
+    frame_head.channel             = ESPNOW_CHANNEL_ALL;
+    frame_head.retransmit_count    = 3;
+    const esp_err_t err = espnow_send(ESPNOW_DATA_TYPE_DATA, ESPNOW_ADDR_BROADCAST, pkt, len, &frame_head, portMAX_DELAY);
+    if (primary != 0 && esp_wifi_set_channel(primary, second) != ESP_OK) {
+        ESP_LOGW("StackPet", "back to channel %u failed: the robot will not hear this remote there", primary);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW("StackPet", "send on every channel failed: %s", esp_err_to_name(err));
+    }
+}

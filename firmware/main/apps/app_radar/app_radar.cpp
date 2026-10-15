@@ -18,6 +18,7 @@
 #include <stackpet/face/face.h>
 #include <stackpet/fx/head_touch.h>
 #include <stackpet/fx/led_fx.h>
+#include <stackpet/remote/remote_link.h>
 #include <stackpet/sound/sound_player.h>
 #include <stackpet/ui/ui.h>
 #include <stackpet/vision/face_bench.h>
@@ -83,6 +84,8 @@ static constexpr int kMaxStalls              = 3;
 static constexpr uint32_t kStallWindowMs     = 60000;
 static constexpr uint32_t kUnstickDelayMs    = 1000;     // stuck, petted: spin again this long after the hand is off
 static constexpr uint32_t kCheckFailedShowMs = 1000;    // "没看清" after a face that could not be confirmed
+// Listening for the remote: how to go back shown this long
+static constexpr uint32_t kRemoteHintMs     = 15000;
 static constexpr int kSpinFrameLatencyMs    = 40;
 static constexpr uint32_t kSpinCheckMs      = 1500;
 static constexpr uint32_t kSpinStartWaitMs  = 1500;     // at most for the yaw spring to come to rest before spinning
@@ -172,6 +175,10 @@ struct AppRadar::State {
     bool spin_stuck          = false;  // stalled too often: sweeping until petted or opened again
     bool unstick_pending     = false;  // petted while stuck: spinning again at unstick_ms
     uint32_t unstick_ms      = 0;
+    // The remote link still listening (opened with the remote, or touched open once it has been used): its M5 button
+    // goes home (the home indicator asks the link)
+    bool remote_session      = false;
+    uint32_t remote_since_ms = 0;  // opened at (how to go back is shown for a while)
     int temp_fails           = 0;
     bool servo_paused       = false;  // too hot: spinning at 0 until it cooled down
     int streamed_yaw        = INT_MIN;
@@ -211,6 +218,11 @@ void AppRadar::onOpen()
 
     _state   = std::make_unique<State>();
     auto& st = *_state;
+    st.remote_session = stackpet::remote::RemoteLink::instance().listening();
+    if (st.remote_session) {
+        st.remote_since_ms = GetHAL().millis();
+        mclog::tagInfo(getAppInfo().name, "remote listening: its M5 button goes home");
+    }
 
     RadarConfig config;
     config.sweep.limit   = kYawLimit;
@@ -925,6 +937,8 @@ void AppRadar::update_status()
         st.screen.setStatus((now / 2000) % 2 == 0 ? "头被卡住了？" : "摸摸头恢复转动", kTextOrange);
     } else if (st.servo_paused) {
         st.screen.setStatus("舵机降温中", kTextOrange);
+    } else if (st.remote_session && now - st.remote_since_ms < kRemoteHintMs && (now / 2000) % 2 == 1) {
+        st.screen.setStatus("按 M5 键回桌面", kTextCyan);
     } else if (st.machine->inFriendGrace(now)) {
         st.screen.setStatus("友好模式", kTextCyan);
     } else if (st.mode == VisionMode::Motion) {

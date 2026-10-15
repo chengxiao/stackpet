@@ -50,6 +50,8 @@ void xiaozhi_board_init();
 void start_xiaozhi_app();
 bool is_xiaozhi_ready();
 bool is_xiaozhi_idle();
+// StackPet: ESP-NOW listens on the app's WiFi (Hal::attachEspNow()): the board keeps the radio awake, no power save
+bool espnow_keeps_radio_awake();
 XiaozhiConfig_t get_xiaozhi_config();
 void set_xiaozhi_config(const XiaozhiConfig_t& config);
 
@@ -57,6 +59,8 @@ i2c_master_bus_handle_t board_get_i2c_bus();
 StackChanCamera* board_get_camera();
 int board_get_battery_level();
 bool board_is_battery_charging();
+// StackPet: on a cable (charging or full); true when the PMIC cannot be read (no power saving then)
+bool board_has_external_power();
 void board_set_backlight_brightness(uint8_t brightness, bool permanent = false);
 uint8_t board_get_backlight_brightness();
 void board_set_speaker_volume(uint8_t volume, bool permanent = false);

@@ -133,7 +133,10 @@ void Hal::updateHeapStatusLog()
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
 #include <stackchan/stackchan.h>
+#include <stackpet/remote/remote_link.h>
+#include <stackpet/ui/ui.h>
 #include <apps/common/common.h>
+#include <esp_heap_caps.h>
 #include <assets/assets.h>
 
 void Hal::xiaozhi_board_init()
@@ -141,6 +144,93 @@ void Hal::xiaozhi_board_init()
     mclog::tagInfo(_tag, "xiaozhi board init");
 
     hal_bridge::xiaozhi_board_init();
+}
+
+// StackPet: the remote in use, its M5 button goes home from the AI agent too (its copy on every channel, heard on
+// xiaozhi's WiFi). Not right at the first standby: the wake word's models load then, the internal RAM's lowest point
+// (12 KB measured); a while after, with room to spare (the espnow component's task has its stack in PSRAM, patched:
+// what stays internal is about 1 KB). Outside the LVGL lock: espnow_init() registers WiFi event handlers, under the
+// default event loop's lock. An attach that did not take (the WiFi reconnecting) is tried again a while later
+static constexpr uint32_t kRemoteAttachAfterMs = 10000;
+static constexpr uint32_t kRemoteAttachRetryMs = 5000;
+static constexpr uint32_t kRemoteRamCheckMs    = 1000;  // not enough: looked at again this often
+static constexpr size_t kRemoteAttachMinFree   = 30 * 1024;
+static constexpr size_t kRemoteAttachMinBlock  = 4 * 1024;
+static constexpr uint32_t kRemoteNoticeMs      = 3000;
+static bool s_remote_notice_pending            = false;  // this task only
+
+static void remote_attach_update()
+{
+    static uint32_t due_ms     = 0;
+    static bool done           = false;
+    static bool waiting_logged = false;
+    auto& link                 = stackpet::remote::RemoteLink::instance();
+    if (done || !hal_bridge::is_xiaozhi_ready()) {
+        return;
+    }
+    if (!stackpet::remote::RemoteLink::usedSincePowerOn()) {
+        done = true;  // not in use: nothing to listen for (it cannot become so here, nothing is heard)
+        return;
+    }
+    const uint32_t now = GetHAL().millis();
+    if (due_ms == 0) {
+        due_ms = now + kRemoteAttachAfterMs;
+        return;
+    }
+    if (static_cast<int32_t>(now - due_ms) < 0) {
+        return;
+    }
+    // The largest block walks every heap with interrupts off: only once the free total is enough
+    const size_t free  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t block = free >= kRemoteAttachMinFree ? heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) : 0;
+    if (free < kRemoteAttachMinFree || block < kRemoteAttachMinBlock) {
+        if (!waiting_logged) {
+            waiting_logged = true;  // the largest block measured for this line too (once)
+            mclog::tagInfo(_tag, "remote: waiting for internal RAM ({} free, largest block {})", free,
+                           heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        }
+        due_ms = now + kRemoteRamCheckMs;
+        return;
+    }
+    link.attach();
+    if (!link.listening()) {
+        due_ms = now + kRemoteAttachRetryMs;
+        return;
+    }
+    done                    = true;
+    s_remote_notice_pending = true;
+    mclog::tagInfo(_tag, "remote attached: internal RAM free {} (lowest since boot {}, largest block {}), stack {}",
+                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                   heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), uxTaskGetStackHighWaterMark(nullptr));
+}
+
+// StackPet: once it listens, said on the screen for a moment (the AI agent shows no state to go by), at the very top:
+// clear of every face's eyes and brows. In Chinese if the CN font is still where it was loaded (the AI agent may have
+// downloaded new assets and mapped them again since), else in English with the built-in font. With the LVGL lock
+static void remote_notice_update()
+{
+    static lv_obj_t* notice = nullptr;
+    static uint32_t shown_ms = 0;
+    if (s_remote_notice_pending) {
+        s_remote_notice_pending = false;
+        const bool cn           = stackpet::ui::fontCn20Current();
+        notice                  = lv_label_create(lv_layer_top());
+        lv_obj_set_style_text_font(notice, cn ? stackpet::ui::fontCn20() : &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(notice, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_bg_color(notice, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(notice, 160, 0);
+        lv_obj_set_style_radius(notice, 12, 0);
+        lv_obj_set_style_pad_hor(notice, 12, 0);
+        lv_obj_set_style_pad_ver(notice, 2, 0);
+        lv_label_set_text(notice, cn ? "现在可以按 M5 回桌面" : "Press M5 to go home");
+        lv_obj_align(notice, LV_ALIGN_TOP_MID, 0, 4);
+        shown_ms = GetHAL().millis();
+    }
+    if (notice != nullptr && GetHAL().millis() - shown_ms >= kRemoteNoticeMs) {
+        lv_obj_delete(notice);
+        notice = nullptr;
+        mclog::tagInfo(_tag, "remote notice shown: stack {}", uxTaskGetStackHighWaterMark(nullptr));
+    }
 }
 
 static void _stackchan_update_task(void* param)
@@ -151,6 +241,7 @@ static void _stackchan_update_task(void* param)
         vTaskDelay(pdMS_TO_TICKS(20));
 
         tools::update_reminders();
+        remote_attach_update();  // StackPet: outside the LVGL lock
 
         LvglLockGuard lock;
 
@@ -174,6 +265,7 @@ static void _stackchan_update_task(void* param)
 
         view::update_home_indicator();
         view::update_status_bar();
+        remote_notice_update();  // StackPet
     }
 }
 
@@ -232,6 +324,11 @@ uint8_t Hal::getBatteryLevel()
 bool Hal::isBatteryCharging()
 {
     return hal_bridge::board_is_battery_charging();
+}
+
+bool Hal::hasExternalPower()
+{
+    return hal_bridge::board_has_external_power();
 }
 
 void Hal::factoryReset()

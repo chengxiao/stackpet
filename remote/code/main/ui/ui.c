@@ -94,5 +94,8 @@ void switch_screen(int screen_id)
 void ui_init()
 {
     create_setup_screen();
-    lv_disp_load_scr(setup_screen);
+    // StackPet: straight to the running screen, so the remote sends right away (channel 1, id 0, the setup screen's
+    // defaults); the power button goes on to the IMU screen, then the setup one
+    create_running_screen();
+    lv_disp_load_scr(running_screen);
 }

@@ -19,6 +19,10 @@ typedef struct {
     uint8_t screen_mode;
     uint8_t select_mode;
     bool btnB_status;
+    bool home_held;       // StackPet: the M5 button (BtnA) held down, from the main loop ...
+    uint32_t home_click;  // ... and pressed since a sending loop last looked (atomic: the main loop sets, it takes)
+    uint8_t buttons;      // StackPet: bit 0 = the stick pressed in, bit 1 = the M5 button (the packet's 9th byte)
+    uint8_t home_count;   // StackPet: the M5 button's presses so far (the 11th byte)
     float accel_x;
     float accel_y;
     float accel_z;

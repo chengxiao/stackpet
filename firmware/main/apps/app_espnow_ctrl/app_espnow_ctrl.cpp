@@ -17,6 +17,11 @@
 #include <mutex>
 #include <string>
 #include <stackpet/face/face.h>
+#include <stackpet/remote/remote_actions.h>
+#include <stackpet/remote/remote_link.h>
+#include <stackpet/remote/stick_gestures.h>
+#include <stackpet/sound/sound_player.h>
+#include <stackpet/ui/ui.h>
 
 using namespace mooncake;
 using namespace smooth_ui_toolkit::lvgl_cpp;
@@ -39,11 +44,16 @@ void AppEspnowControl::onCreate()
     mclog::tagInfo(getAppInfo().name, "on create");
 }
 
-static std::mutex _mutex;
-static std::vector<uint8_t> _received_data;
 static int _receiver_id  = 0;
 static int _wifi_channel = 0;
 static bool _is_receiver = false;
+
+// StackPet: the remote's packets come through stackpet::remote::RemoteLink (the launcher listens from boot on), with
+// stick gestures on top
+static stackpet::remote::StickGestures _gestures;
+static stackpet::remote::RemoteActions _actions;
+static int _stick_yaw   = 0;
+static int _stick_pitch = 450;
 
 void AppEspnowControl::onOpen()
 {
@@ -53,28 +63,44 @@ void AppEspnowControl::onOpen()
     _receiver_id  = 1;
     _wifi_channel = 1;
 
-    // Start setup page
-    bool is_advanced = start_startup_page();
-    if (is_advanced) {
-        start_advanced_page();
+    auto& link        = stackpet::remote::RemoteLink::instance();
+    const bool direct = link.takeDirectReceiver();
+    if (direct) {
+        // StackPet: opened with the remote (picked on the home screen): receiving right away, on the channel it was
+        // heard on, as the receiver id picked last time
+        _is_receiver  = true;
+        _wifi_channel = link.channel() > 0 ? link.channel() : 1;
+        _receiver_id  = link.receiverId();
+    } else {
+        // Start setup page
+        bool is_advanced = start_startup_page();
+        if (is_advanced) {
+            start_advanced_page();
+        }
+        if (_is_receiver) {
+            link.setReceiverId(_receiver_id);  // StackPet: the launcher and the other apps listen as this one too
+        }
     }
     mclog::tagInfo(getAppInfo().name, "get setup: role {}, id {}, channel {}", _is_receiver ? "Receiver" : "Sender",
                    _receiver_id, _wifi_channel);
 
-    // Start espnow
-    GetHAL().startEspNow(_wifi_channel);
-    GetHAL().onEspNowData.connect([](const std::vector<uint8_t>& data) {
-        std::lock_guard<std::mutex> lock(_mutex);
-        _received_data = data;
-    });
+    // Start espnow (StackPet: through the remote link, which may be listening already)
+    link.start(false);
+    link.lockChannel(_wifi_channel);
+    _gestures.reset();
 
     // Normal avatar
     LvglLockGuard lock;
 
     auto& stackchan = GetStackChan();
 
-    auto avatar = stackpet::face::create(lv_screen_active());
+    auto avatar = stackpet::face::create(lv_screen_active(), stackpet::ui::fontCn20());
     stackchan.attachAvatar(std::move(avatar));
+    if (direct) {
+        // StackPet: the remote brought us here
+        _actions.announce(GetHAL().millis(), "遥控器连上啦～", avatar::Emotion::Happy);
+        stackpet::SoundPlayer::instance().playSfx(stackpet::Sfx::Success);
+    }
 
     stackchan.clearModifiers();
     stackchan.addModifier(std::make_unique<BreathModifier>());
@@ -155,38 +181,33 @@ void AppEspnowControl::start_advanced_page()
     }
 }
 
-void handle_received_data()
+static void handle_received_data(uint32_t now)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-
     // [target-id (uint8)] [yaw-angle (int16)] [pitch-angle (int16)] [speed (int16)] [laser-enabled (uint8)]
+    // ([buttons (uint8)] [channel (uint8)]: StackPet's remote firmware, see stackpet/remote/remote_packet.h)
     // id: 0 for broadcast
     // yaw: -1280 ~ 1280
     // pitch: 0 ~ 900
     // speed: 0 ~ 1000, suggest 600
     // laser-enabled: 0 = off, 1 = on
-    if (_received_data.size() >= 8) {
-        uint8_t target_id = _received_data[0];
-        if (target_id != 0 && target_id != _receiver_id) {
-            mclog::info("not me, target id: {}", target_id);
-            _received_data.clear();
-            return;
+    const auto packets = stackpet::remote::RemoteLink::instance().update(now);
+    for (const auto& packet : packets) {
+        _gestures.update(now, packet);
+        _stick_yaw   = packet.yaw;
+        _stick_pitch = packet.pitch;
+        GetHAL().setLaserEnabled(packet.laser);
+        if (_actions.busy()) {
+            continue;  // the head is a gesture's for a moment, where the stick is when it ends
         }
-
-        int16_t yaw_angle   = static_cast<int16_t>(_received_data[1] | (_received_data[2] << 8));
-        int16_t pitch_angle = static_cast<int16_t>(_received_data[3] | (_received_data[4] << 8));
-        int16_t speed       = static_cast<int16_t>(_received_data[5] | (_received_data[6] << 8));
-        bool laser_enabled  = (_received_data[7] != 0);
-
-        mclog::info("yaw: {}, pitch: {}, speed: {}, laser: {}", yaw_angle, pitch_angle, speed, laser_enabled);
-
         auto& motion = GetStackChan().motion();
-        motion.moveWithSpeed(yaw_angle, pitch_angle, speed);
-
-        GetHAL().setLaserEnabled(laser_enabled);
+        motion.moveWithSpeed(packet.yaw, packet.pitch, packet.speed);
     }
 
-    _received_data.clear();
+    for (const auto& event : _gestures.take()) {
+        mclog::info("remote gesture {}", static_cast<int>(event.gesture));
+        _actions.start(event, now, _stick_yaw, _stick_pitch);
+    }
+    _actions.update(now, _stick_yaw, _stick_pitch);
 }
 
 void handle_send_pose()
@@ -236,7 +257,7 @@ void AppEspnowControl::onRunning()
     LvglLockGuard lock;
 
     if (_is_receiver) {
-        handle_received_data();
+        handle_received_data(GetHAL().millis());
     } else {
         handle_send_pose();
     }
@@ -250,6 +271,9 @@ void AppEspnowControl::onRunning()
 void AppEspnowControl::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
+
+    _actions.stop();  // StackPet: a spin gesture under way: the yaw servo back in position mode
+    stackpet::SoundPlayer::instance().shutdown();
 
     LvglLockGuard lock;
 

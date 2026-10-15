@@ -11,6 +11,7 @@
 #include <smooth_lvgl.hpp>
 #include <assets/assets.h>
 #include <hal/hal.h>
+#include <stackpet/remote/remote_link.h>
 #include <memory>
 #include <lvgl.h>
 
@@ -269,6 +270,13 @@ void update_home_indicator()
 {
     if (_home_indicator) {
         _home_indicator->update();
+    }
+    // StackPet: the remote's M5 button goes home too (heard only while the remote link listens: the apps that keep it,
+    // and the network apps once their WiFi is up). Asked also without an indicator, so a press made meanwhile does not
+    // go home later
+    if (stackpet::remote::RemoteLink::instance().takeHomePress(GetHAL().millis()) && _home_indicator &&
+        _home_indicator->onGoHome) {
+        _home_indicator->onGoHome();
     }
 }
 

@@ -192,6 +192,7 @@ public:
     void updateHeapStatusLog();
     uint8_t getBatteryLevel();
     bool isBatteryCharging();
+    bool hasExternalPower();  // StackPet: on a cable (charging or full): no power saving then
     void factoryReset();
 
     /* --------------------------------- Display -------------------------------- */
@@ -264,8 +265,29 @@ public:
 
     /* --------------------------------- EspNow --------------------------------- */
     uitk::Signal<const std::vector<uint8_t>&> onEspNowData;
-    void startEspNow(int channel);
+    void startEspNow(int channel);  // StackPet: when already started only the channel changes (attached: not even that)
     bool espNowSend(const std::vector<uint8_t>& data, const uint8_t* destAddr = nullptr);
+    // StackPet: the launcher listens for the remote from boot on; apps that start WiFi their own way stop it first
+    void stopEspNow();
+    // StackPet: ESP-NOW on the WiFi an app started (connected to the router: its channel, no switching), the radio
+    // kept awake (power save off) while it listens; false if the WiFi is not up, or ESP-NOW cannot start this boot
+    // (its init failed once: internal RAM gone). stopEspNow() leaves that WiFi on
+    bool attachEspNow();
+    // StackPet: the launcher's WiFi (ESP-NOW, listening for the remote) onto the router for a moment: the screensaver
+    // fetches Claude's usage from the Mac. The router's channel meanwhile (setEspNowChannel() does nothing). False if
+    // ESP-NOW is not up the launcher's way, or no IP within timeoutMs, or aborted() said so; leaveRouter() either way
+    // (back on `channel`). It waits: the fetch's own task, never the main loop
+    bool joinRouter(const std::string& ssid, const std::string& password, uint32_t timeoutMs,
+                    const std::function<bool()>& aborted);
+    void leaveRouter(int channel);
+    // StackPet (the fetch's log): the MAC the ARP table has for an IPv4 address ("12:34:56:78:9a:bc"), "none"
+    std::string routerArpFor(const std::string& ipv4);
+    void routerStatsDump();  // StackPet (diagnosis): the air heard while joined, the WiFi driver's counters to the log
+    void setEspNowChannel(int channel);
+    int getEspNowChannel();    // 0: not started
+    // The channel the packet onEspNowData is handing out was sent on (its handlers ask): the espnow component puts its
+    // frame header's channel into rx_ctrl->channel
+    int getEspNowRxChannel();
     void setLaserEnabled(bool enabled);
 
     /* ------------------------------- Warm Reboot ------------------------------ */

@@ -20,6 +20,7 @@ extern "C" {
 void wifi_espnow_init(uint8_t channel);
 int wifi_espnow_reinit(uint8_t new_channel);
 void espnow_send_data(uint8_t *pkt, size_t len);
+void espnow_send_everywhere(uint8_t *pkt, size_t len);  // StackPet: the M5 press's copy, on every channel
 
 #ifdef __cplusplus
 }

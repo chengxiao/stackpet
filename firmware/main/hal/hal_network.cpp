@@ -5,6 +5,7 @@
  */
 #include "hal.h"
 #include <stackchan/stackchan.h>
+#include <stackpet/remote/remote_link.h>
 #include <mooncake.h>
 #include <mooncake_log.h>
 #include <wifi_manager.h>
@@ -117,6 +118,9 @@ void Hal::startNetwork(std::function<void(std::string_view)> onLog)
     startSntp();
 
     _is_network_connected = true;
+
+    // StackPet: the remote in use, its M5 button goes home from this app too (its copy on every channel)
+    stackpet::remote::RemoteLink::instance().attach();
 }
 
 WifiStatus Hal::getWifiStatus()

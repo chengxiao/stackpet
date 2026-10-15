@@ -8,6 +8,7 @@
 #include <assets/assets.h>
 #include <functional>
 #include <hal/hal.h>
+#include <stackpet/ui/ui.h>
 #include <cstdint>
 #include <vector>
 
@@ -284,6 +285,7 @@ private:
 
 static std::string _tag        = "LauncherView";
 static constexpr int _icon_gap = 320;
+static constexpr int kOpenBarWidth = 120;  // StackPet
 // Create 5 copies: [0:Backup] [1:Buffer] [2:Main] [3:Buffer] [4:Backup]
 static constexpr int _loop_copies       = 5;
 static constexpr int _center_copy_index = 2;
@@ -295,6 +297,9 @@ static std::unique_ptr<DynamicIconLabel> _dynamic_icon_label;
 
 LauncherView::~LauncherView()
 {
+    _open_hint.reset();
+    _open_fill.reset();
+    _open_track.reset();
     _icon_images.clear();
     _icon_panels.clear();
     _lr_indicators_images.clear();
@@ -345,6 +350,7 @@ void LauncherView::init(std::vector<mooncake::AppProps_t> appPorps)
             // Icon click callback
             auto app_id = props.appID;
             auto pos_x  = icon_x;
+            _icon_app_ids.push_back(app_id);
             _icon_panels.back()->onClick().connect([&, app_id, pos_x]() {
                 _clicked_app_id          = app_id;
                 _last_clicked_icon_pos_x = pos_x;
@@ -432,6 +438,47 @@ void LauncherView::init(std::vector<mooncake::AppProps_t> appPorps)
     /* --------------------------- Dynamic icon label --------------------------- */
     _dynamic_icon_label = std::make_unique<DynamicIconLabel>();
     _dynamic_icon_label->init(icon_label_texts, _icon_gap, _panel->get());
+
+    /* ---------------- StackPet: the remote's stick held in to open ---------------- */
+    // Between the icon (down to y 75) and the page dots (from y 91): white filling a dark track, readable on every
+    // app's colour
+    _open_track = std::make_unique<Container>(_panel->get());
+    _open_track->addFlag(LV_OBJ_FLAG_FLOATING);
+    _open_track->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
+    _open_track->removeFlag(LV_OBJ_FLAG_CLICKABLE);
+    _open_track->setAlign(LV_ALIGN_CENTER);
+    _open_track->setPos(0, 84);
+    _open_track->setSize(kOpenBarWidth, 6);
+    _open_track->setPadding(0, 0, 0, 0);
+    _open_track->setBorderWidth(0);
+    _open_track->setRadius(LV_RADIUS_CIRCLE);
+    _open_track->setBgColor(lv_color_hex(0x000000));
+    _open_track->setBgOpa(90);
+    _open_fill = std::make_unique<Container>(_open_track->get());
+    _open_fill->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
+    _open_fill->removeFlag(LV_OBJ_FLAG_CLICKABLE);
+    _open_fill->setAlign(LV_ALIGN_LEFT_MID);
+    _open_fill->setPos(0, 0);
+    _open_fill->setSize(0, 6);
+    _open_fill->setBorderWidth(0);
+    _open_fill->setRadius(LV_RADIUS_CIRCLE);
+    _open_fill->setBgColor(lv_color_hex(0xFFFFFF));
+    _open_fill->setBgOpa(255);
+    _open_track->setHidden(true);
+    // Over the page dots: the app is left by touch (the remote cannot take it home)
+    _open_hint = std::make_unique<Label>(_panel->get());
+    _open_hint->addFlag(LV_OBJ_FLAG_FLOATING);
+    _open_hint->removeFlag(LV_OBJ_FLAG_CLICKABLE);
+    _open_hint->setAlign(LV_ALIGN_CENTER);
+    _open_hint->setPos(0, 104);
+    _open_hint->setTextFont(stackpet::ui::fontCn20());
+    _open_hint->setTextColor(lv_color_hex(0xFFFFFF));
+    _open_hint->setBgColor(lv_color_hex(0x000000));
+    _open_hint->setBgOpa(150);
+    _open_hint->setRadius(12);
+    _open_hint->setPadding(2, 2, 10, 10);
+    _open_hint->setText("打开后用触摸回桌面");
+    _open_hint->setHidden(true);
 
     /* ----------------------------- History restore ---------------------------- */
     bool need_restore      = false;
@@ -579,4 +626,52 @@ void LauncherView::handle_state_normal()
     _dynamic_bg_color->update(scroll_x);
     _page_indicator->update(scroll_x);
     _dynamic_icon_label->update(scroll_x);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              StackPet: the remote                          */
+/* -------------------------------------------------------------------------- */
+bool LauncherView::ready() const
+{
+    return _state == STATE_NORMAL;
+}
+
+// The icon where the scroll under way ends (a step's, the snap after a fling, an arrow's), else the one in the middle
+static int focus_x(lv_obj_t* panel)
+{
+    lv_point_t end;
+    lv_obj_get_scroll_end(panel, &end);
+    return (end.x + _icon_gap / 2) / _icon_gap * _icon_gap;
+}
+
+void LauncherView::step(int direction)
+{
+    const int set_width = static_cast<int>(_icon_app_ids.size()) / _loop_copies * _icon_gap;
+    int target          = focus_x(_panel->get()) + direction * _icon_gap;
+    // Steps in quick succession keep the panel scrolling, and the official wrap waits for it to stop: a step out of
+    // the middle sets jumps a set back first (the same icons: nothing shows; the jump ends the scroll under way)
+    const int jump = target < set_width * 3 / 2 ? set_width : (target > set_width * 7 / 2 ? -set_width : 0);
+    if (jump != 0) {
+        _panel->scrollBy(-jump, 0, LV_ANIM_OFF);
+        target += jump;
+    }
+    // In place of the scroll under way: also a step straight back before that one has moved (a scroll by the
+    // difference, zero then, would leave it going)
+    lv_obj_scroll_to_x(_panel->get(), target, LV_ANIM_ON);
+}
+
+int LauncherView::focusedApp() const
+{
+    if (_icon_app_ids.empty()) {
+        return -1;
+    }
+    const int index = focus_x(_panel->get()) / _icon_gap;
+    return _icon_app_ids[uitk::clamp(index, 0, static_cast<int>(_icon_app_ids.size()) - 1)];
+}
+
+void LauncherView::setOpenProgress(float progress, bool touchHome)
+{
+    _open_track->setHidden(progress <= 0.0f);
+    _open_fill->setWidth(static_cast<int32_t>(uitk::clamp(progress, 0.0f, 1.0f) * kOpenBarWidth));
+    _open_hint->setHidden(progress <= 0.0f || !touchHome);
 }

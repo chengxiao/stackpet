@@ -28,32 +28,43 @@ joystick_data_t joystick_data;
 
 /**
  * @brief Handle Button Press.
- * 1. Press BtnA to switch setup_mode UI and running_mode UI.
+ * 1. StackPet: press the power button (a short press, under 1 s; held 4 s it still powers the remote off) to go through
+ *    the screens: running, IMU, setup. On the setup screen BtnA ("Press to Start") enters running mode, as before.
  * 2. Press BtnB to switch espnow-channel or id on setup_mode;
  * 3. Press BtnB to send btnB_status to remote on running_mode.
+ * 4. StackPet: everywhere else BtnA, the M5 button, is the robot's: held, it goes in the packets (back to its home
+ *    screen). The press that left the setup screen is not, until it is let go.
  */
 void handle_button_press()
 {
-    static uint8_t screen_mode = MODE_SETUP;
-    // check if BtnA is pressed
-    if (M5.BtnA.wasPressed()) {
-        // use BtnA to switch mode
-        screen_mode = (screen_mode + 1) % 3;
+    static uint8_t screen_mode = MODE_RUNNING;  // StackPet: starts on the running screen (ui_init)
+    static bool a_left_setup   = false;         // StackPet: BtnA held since it left the setup screen
+    const bool start           = joystick_data.screen_mode == MODE_SETUP && M5.BtnA.wasPressed();
+    if (M5.BtnPWR.wasClicked() || start) {
+        // use the power button (or BtnA on the setup screen) to switch mode
+        screen_mode  = start ? MODE_RUNNING : (screen_mode + 1) % 3;
+        a_left_setup = a_left_setup || start;
 
         if (screen_mode == MODE_SETUP) {
-            // in setup mode, press A to enter running mode
+            // in IMU mode, press the power button to enter setup mode
             joystick_data.screen_mode = MODE_SETUP;
             switch_screen(joystick_data.screen_mode);
         } else if (screen_mode == MODE_RUNNING) {
-            // in running mode, press A to enter IMU mode
+            // in setup mode, press the power button or BtnA to enter running mode
             wifi_espnow_reinit(joystick_data.channel);
             joystick_data.screen_mode = MODE_RUNNING;
             switch_screen(joystick_data.screen_mode);
         } else if (screen_mode == MODE_IMU) {
-            // in IMU mode, press A to return to setup mode
+            // in running mode, press the power button to enter IMU mode
             joystick_data.screen_mode = MODE_IMU;
             switch_screen(joystick_data.screen_mode);
         }
+    }
+    a_left_setup            = a_left_setup && M5.BtnA.isPressed();
+    joystick_data.home_held = M5.BtnA.isPressed() && !a_left_setup;
+    if (M5.BtnA.wasPressed() && !start) {
+        // StackPet: a click shorter than a turn of the sending loop still goes out once (joystick_handle.c)
+        __atomic_store_n(&joystick_data.home_click, 1u, __ATOMIC_RELEASE);
     }
     if (M5.BtnB.wasPressed()) {
         if (joystick_data.screen_mode == MODE_SETUP) {
@@ -93,6 +104,11 @@ void app_main(void)
     xTaskCreate(handle_setup_screen, "handle_setup_screen", 8192, &joystick_data, 5, NULL);      // handle setup mode
     xTaskCreate(handle_running_screen, "handle_running_screen", 8192, &joystick_data, 5, NULL);  // handle running mode
     xTaskCreate(handle_imu_screen, "handle_imu_screen", 8192, &joystick_data, 5, NULL);
+
+    // StackPet: the press that powered the remote on may have come in as a short press, let go after M5.begin() read
+    // the power key (the AXP192 keeps it until it is read): read and dropped here. Let go from now on, it was held
+    // for the whole start-up (2 s or so), a long press: no page change
+    M5.update();
 
     while (1) {
         M5.update();

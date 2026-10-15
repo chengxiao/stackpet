@@ -640,6 +640,10 @@ public:
         if (level != PowerSaveLevel::LOW_POWER) {
             power_save_timer_->WakeUp();
         }
+        // StackPet: asleep between the router's beacons the WiFi would miss the remote's M5 button
+        if (hal_bridge::espnow_keeps_radio_awake()) {
+            level = PowerSaveLevel::PERFORMANCE;
+        }
         WifiBoard::SetPowerSaveLevel(level);
     }
 
@@ -694,6 +698,19 @@ bool hal_bridge::board_is_battery_charging()
     } else {
         return false;
     }
+}
+
+bool hal_bridge::board_has_external_power()
+{
+    // As the PMIC's IsExternalPowerConnected(): anything but discharging is the cable (also with the battery full)
+    auto& board      = Board::GetInstance();
+    int level        = 0;
+    bool charging    = false;
+    bool discharging = false;
+    if (board.GetBatteryLevel(level, charging, discharging)) {
+        return !discharging;
+    }
+    return true;
 }
 
 void hal_bridge::board_set_backlight_brightness(uint8_t brightness, bool permanent)

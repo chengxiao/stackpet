@@ -555,7 +555,10 @@ private:
         }
         release_camera();
         if (_wifi_performance) {
-            WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::BALANCED);
+            // StackPet: not while ESP-NOW listens on this WiFi for the remote (power save would miss it)
+            if (!hal_bridge::espnow_keeps_radio_awake()) {
+                WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::BALANCED);
+            }
             _wifi_performance = false;
         }
     }

@@ -349,6 +349,11 @@ endif()
 if(STACKPET_FD_BENCH)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE STACKPET_FD_BENCH=1)
 endif()
+# StackPet test hook: `-DSTACKPET_AUTOOPEN_REMOTE=1` (with STACKPET_AUTOOPEN=11) opens the RADAR as if from the
+# remote: the remote link stays on (memory and speed with the WiFi up), `-DSTACKPET_AUTOOPEN_REMOTE=0` turns it off
+if(STACKPET_AUTOOPEN_REMOTE)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE STACKPET_AUTOOPEN_REMOTE=1)
+endif()
 # StackPet test hook: `-DSTACKPET_CAL=1` (with STACKPET_AUTOOPEN=7) adds the aim / rotation calibration endpoints to
 # the REMOTE app (/debug/faces with the face detector running, /debug/spin), driven by the host tool aim_cal.py
 if(STACKPET_CAL)

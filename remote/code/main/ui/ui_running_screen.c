@@ -28,6 +28,12 @@ lv_obj_t* id_info_label      = NULL;
  *          and a red circular dot that represents the current joystick position
  * @warning This function should only be called once per application run to avoid memory leaks
  */
+// StackPet (joystick_handle.c): the JoyC's button register as last read, and its failed reads in a row
+extern int stackpet_joyc_button_raw;
+extern int stackpet_joyc_button_err;
+extern uint32_t stackpet_joyc_fail_streak;
+static lv_obj_t* title_label = NULL;
+
 void create_running_screen()
 {
     while (!lvgl_port_lock()) {
@@ -57,6 +63,7 @@ void create_running_screen()
     lv_label_set_text(label, "StackChan :)");
     lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    title_label = label;
 
     // Create joystick area
     joystick_area = lv_obj_create(running_screen);
@@ -156,8 +163,16 @@ void update_running_screen(int16_t joyX, int16_t joyY, uint8_t channel, uint8_t 
     // Update joystick dot position (relative to joystick_area center)
     lv_obj_align(joystick_dot, LV_ALIGN_TOP_LEFT, x_pos - 5, y_pos - 5);
 
-    // Update battery level
-    lv_label_set_text_fmt(battery_label, "Bat: %d%%", bat);
+    // Update battery level (StackPet: and the JoyC's button register, 1 up, 0 pressed)
+    if (stackpet_joyc_button_raw < 0 && stackpet_joyc_button_err != 0) {
+        lv_label_set_text_fmt(battery_label, "Bat:%d%% B!%d", bat, stackpet_joyc_button_err);  // never read: why
+    } else {
+        lv_label_set_text_fmt(battery_label, "Bat:%d%% B:%d", bat, stackpet_joyc_button_raw);
+    }
+    // StackPet: the JoyC stopped answering: only a power cycle of the whole remote helps (README, remote)
+    if (title_label != NULL) {
+        lv_label_set_text(title_label, stackpet_joyc_fail_streak >= 20 ? "JoyC stuck" : "StackChan :)");
+    }
 
     // Update Channel and ID display
     lv_label_set_text_fmt(channel_info_label, "Channel: %u", channel);
@@ -187,6 +202,7 @@ void ui_running_screen_destory()
     lvgl_port_unlock();
     joystick_dot       = NULL;
     joystick_area      = NULL;
+    title_label        = NULL;
     battery_label      = NULL;
     channel_info_label = NULL;
     id_info_label      = NULL;

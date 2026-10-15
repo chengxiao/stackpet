@@ -20,6 +20,9 @@ static const std::string_view _tag = "StackPetUI";
 // font_puhui_basic_20_4, for which the script ships the full "common" variant as a cbin font.
 static constexpr const char* kCn20AssetName = "font_puhui_common_20_4.bin";
 
+static void* s_cn20_data  = nullptr;  // the file fontCn20() was made from
+static size_t s_cn20_size = 0;
+
 const lv_font_t* fontCn20()
 {
     static const lv_font_t* font = nullptr;
@@ -36,6 +39,8 @@ const lv_font_t* fontCn20()
             // LV_SYMBOL_* icons and anything the subset lacks come from the built-in Montserrat
             cbin->fallback = &lv_font_montserrat_20;
             font           = cbin;
+            s_cn20_data    = data;
+            s_cn20_size    = size;
             mclog::tagInfo(_tag, "loaded {} ({} bytes)", kCn20AssetName, size);
         }
     }
@@ -45,6 +50,17 @@ const lv_font_t* fontCn20()
         font = &lv_font_montserrat_20;
     }
     return font;
+}
+
+bool fontCn20Current()
+{
+    fontCn20();
+    void* data  = nullptr;
+    size_t size = 0;
+    // Mapped again (new assets downloaded) it is often at the same address: the size too (the same address and size
+    // with other contents is not told apart)
+    return s_cn20_data != nullptr && Assets::GetInstance().GetAssetData(kCn20AssetName, data, size) &&
+           data == s_cn20_data && size == s_cn20_size;
 }
 
 // The generated fonts are const, so use a mutable copy to attach the Chinese 20 px font as fallback:

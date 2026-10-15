@@ -28,6 +28,7 @@
     {
         "url": "https://github.com/espressif/esp-now.git",
         "path": "components/esp-now",
-        "branch": "c33383de97f3ed2fc52117f5ef04f71990432e5d"
+        "branch": "c33383de97f3ed2fc52117f5ef04f71990432e5d",
+        "patch": "patches/esp-now.patch"
     }
 ]

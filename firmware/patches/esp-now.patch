@@ -1,0 +1,65 @@
+diff --git a/src/espnow/include/espnow.h b/src/espnow/include/espnow.h
+index a4e0b13..56ca326 100644
+--- a/src/espnow/include/espnow.h
++++ b/src/espnow/include/espnow.h
+@@ -19,6 +19,10 @@
+ #include "espnow_utils.h"
+ #include "espnow_security.h"
+ 
++/* StackPet (firmware/patches/esp-now.patch): espnow_init()'s task has its stack in PSRAM (without encryption).
++ * hal_espnow.cpp checks for this, so a patch that did not apply shows when building */
++#define ESPNOW_STACKPET_TASK_STACK_IN_PSRAM 1
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif /**< _cplusplus */
+diff --git a/src/espnow/src/espnow.c b/src/espnow/src/espnow.c
+index 167ebfa..568f96c 100644
+--- a/src/espnow/src/espnow.c
++++ b/src/espnow/src/espnow.c
+@@ -4,6 +4,8 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
++#include "esp_heap_caps.h"
++#include "freertos/idf_additions.h"
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -992,7 +994,11 @@ EXIT:
+     }
+ 
+     ESP_LOGI(TAG, "main task exit");
+-    vTaskDelete(NULL);
++    if (arg) {
++        vTaskDeleteWithCaps(NULL);  /* StackPet: made by xTaskCreateWithCaps() (espnow_init()) */
++    } else {
++        vTaskDelete(NULL);
++    }
+ }
+ 
+ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+@@ -1100,7 +1106,22 @@ esp_err_t espnow_init(const espnow_config_t *config)
+     ESP_LOGI(TAG, "mac: " MACSTR ", version: %d", MAC2STR(ESPNOW_ADDR_SELF), ESPNOW_VERSION);
+ 
+     ESP_LOGI(TAG, "Enable main task");
+-    xTaskCreate(espnow_main_task, "espnow_main", 4096, NULL, tskIDLE_PRIORITY + 1, NULL);
++    /* StackPet: the task's 4 KB stack in PSRAM (xTaskCreateWithCaps(): the TCB stays internal): internal RAM is tight
++     * in the AI agent, where the remote link attaches to xiaozhi's WiFi. Without encryption the task only hands
++     * packets to the receive handlers (and acks): nothing that touches the flash, which a stack in PSRAM must not
++     * (with it, it reads its keys from NVS: espnow_get_dec_key()). It ends with vTaskDeleteWithCaps(), which frees
++     * both; with encryption, or PSRAM short, the usual task (its parameter says which) */
++    BaseType_t made = pdFAIL;
++    if (!config->sec_enable) {
++        made = xTaskCreateWithCaps(espnow_main_task, "espnow_main", 4096, (void *)1, tskIDLE_PRIORITY + 1, NULL,
++                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++        if (made != pdPASS) {
++            ESP_LOGW(TAG, "No PSRAM for the main task's stack: it is internal");
++        }
++    }
++    if (made != pdPASS) {
++        xTaskCreate(espnow_main_task, "espnow_main", 4096, (void *)0, tskIDLE_PRIORITY + 1, NULL);
++    }
+ 
+     return ESP_OK;
+ }

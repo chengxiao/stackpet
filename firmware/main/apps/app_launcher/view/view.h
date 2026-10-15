@@ -33,8 +33,19 @@ public:
     void init(std::vector<mooncake::AppProps_t> appPorps);
     void update();
 
+    // StackPet: the remote (apps/app_launcher/app_launcher.cpp)
+    bool ready() const;           // the startup animation done
+    void step(int direction);     // to the app beside the one shown (+1: the right one), animated
+    int focusedApp() const;       // the app shown (where a step under way ends)
+    // The stick held in: a bar under the icon fills up (0: hidden); touchHome: under it, that the app is left by touch
+    void setOpenProgress(float progress, bool touchHome);
+
 private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
+    std::unique_ptr<uitk::lvgl_cpp::Container> _open_track;  // StackPet
+    std::unique_ptr<uitk::lvgl_cpp::Container> _open_fill;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _open_hint;
+    std::vector<int> _icon_app_ids;  // StackPet: the app of each icon, in order
     std::vector<std::unique_ptr<uitk::lvgl_cpp::Container>> _icon_panels;
     std::vector<std::unique_ptr<uitk::lvgl_cpp::Image>> _icon_images;
     std::vector<std::unique_ptr<uitk::lvgl_cpp::Container>> _lr_indicator_panels;
